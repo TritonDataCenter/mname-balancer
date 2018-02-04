@@ -1,0 +1,6 @@
+[submodule "deps/libcbuf"]
+	path = deps/libcbuf
+	url = https://github.com/jclulow/libcbuf.git
+[submodule "deps/illumos-list"]
+	path = deps/illumos-list
+	url = https://github.com/joyent/illumos-list.git
