@@ -103,30 +103,29 @@ cloop_run(cloop_t *cloop, unsigned int *again)
 		 */
 		clent->clent_active = 1;
 
-		if (!clent->clent_destroy && (pe.portev_events & POLLIN)) {
-			pe.portev_events &= ~(POLLIN);
+		int handle_events = pe.portev_events & (POLLIN | POLLOUT);
+		pe.portev_events &= ~handle_events;
+
+		if (pe.portev_events & (POLLHUP | POLLERR)) {
+			/*
+			 * If there is an error or a hangup, fire both the
+			 * read and write callbacks so that those functions
+			 * may check for errors.
+			 */
+			handle_events |= POLLIN | POLLOUT;
+			pe.portev_events &= ~(POLLHUP | POLLERR);
+		}
+
+		if (!clent->clent_destroy && (handle_events & POLLIN)) {
 			clent->clent_events &= ~(POLLIN);
 			if (clent->clent_on_in != NULL) {
 				clent->clent_on_in(clent, CLOOP_CB_READ);
 			}
 		}
-		if (!clent->clent_destroy && (pe.portev_events & POLLOUT)) {
-			pe.portev_events &= ~(POLLOUT);
+		if (!clent->clent_destroy && (handle_events & POLLOUT)) {
 			clent->clent_events &= ~(POLLOUT);
 			if (clent->clent_on_out != NULL) {
 				clent->clent_on_out(clent, CLOOP_CB_WRITE);
-			}
-		}
-		if (!clent->clent_destroy && (pe.portev_events & POLLHUP)) {
-			pe.portev_events &= ~(POLLHUP);
-			if (clent->clent_on_hup != NULL) {
-				clent->clent_on_hup(clent, CLOOP_CB_HANGUP);
-			}
-		}
-		if (!clent->clent_destroy && (pe.portev_events & POLLERR)) {
-			pe.portev_events &= ~(POLLERR);
-			if (clent->clent_on_err != NULL) {
-				clent->clent_on_err(clent, CLOOP_CB_ERROR);
 			}
 		}
 
