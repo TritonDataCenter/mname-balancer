@@ -69,6 +69,7 @@ typedef enum cconn_state {
 struct cconn {
 	cserver_t *ccn_server;
 	cconn_state_t ccn_state;
+	int ccn_callback_depth;
 
 	cloop_ent_t *ccn_clent;
 	struct sockaddr_storage ccn_remote_addr;
@@ -110,11 +111,13 @@ struct cserver {
 };
 
 static void ccn_handle_incoming_data(cconn_t *ccn, int notify);
+static boolean_t ccn_sendq_finalised(cconn_t *ccn);
 
 static char *
 cconn_state_name(cconn_state_t s)
 {
 	return (s == CCONN_ST_PRE_CONNECTION ? "PRE_CONNECTION" :
+	    s == CCONN_ST_WAITING_FOR_CONNECT ? "WAITING_FOR_CONNECT" :
 	    s == CCONN_ST_WAITING_FOR_DATA ? "WAITING_FOR_DATA" :
 	    s == CCONN_ST_DATA_AVAILABLE ? "DATA_AVAILABLE" :
 	    s == CCONN_ST_READ_EOF ? "READ_EOF" :
@@ -143,7 +146,7 @@ cserver_sockaddr_in(cserver_t *csrv)
 	return ((struct sockaddr_in *)&csrv->csrv_addr);
 }
 
-static struct sockaddr_in *
+const struct sockaddr_in *
 cconn_sockaddr_in(cconn_t *ccn)
 {
 	return ((struct sockaddr_in *)&ccn->ccn_remote_addr);
@@ -154,25 +157,33 @@ cconn_advance_state(cconn_t *ccn, cconn_state_t nstate)
 {
 	cconn_state_t ostate;
 
+	/*
+	 * Callbacks may themselves trigger forward state transitions.  In
+	 * order to avoid freeing the object until we are finished, we track
+	 * recursive execution.
+	 */
+	ccn->ccn_callback_depth++;
+
+top:
 	if (ccn->ccn_state == CCONN_ST_CLOSED) {
 		/*
 		 * Nothing left to do.
 		 */
-		return;
+		goto release;
 	}
 
 	if (ccn->ccn_state == nstate) {
 		/*
 		 * This is not a transition.
 		 */
-		return;
+		goto release;
 	}
 
-top:
 	ostate = ccn->ccn_state;
 	ccn->ccn_state = nstate;
 	if (cserver_debug) {
-		fprintf(stderr, "STATE: %s -> %s\n", cconn_state_name(ostate),
+		fprintf(stderr, "CCONN[%p] STATE: %s -> %s\n", ccn,
+		    cconn_state_name(ostate),
 		    cconn_state_name(nstate));
 	}
 
@@ -191,8 +202,7 @@ top:
 		if (ccn->ccn_on_close != NULL) {
 			ccn->ccn_on_close(ccn, CCONN_CB_CLOSE);
 		}
-		cconn_destroy(ccn);
-		return;
+		goto release;
 
 	case CCONN_ST_DATA_AVAILABLE:
 		VERIFY(ostate == CCONN_ST_WAITING_FOR_DATA);
@@ -200,19 +210,30 @@ top:
 			ccn->ccn_on_data_available(ccn,
 			    CCONN_CB_DATA_AVAILABLE);
 		}
-		return;
+		goto release;
 
 	case CCONN_ST_WAITING_FOR_DATA:
 		VERIFY(ostate == CCONN_ST_PRE_CONNECTION ||
 		    ostate == CCONN_ST_WAITING_FOR_CONNECT ||
 		    ostate == CCONN_ST_DATA_AVAILABLE);
 
+		if (ostate == CCONN_ST_WAITING_FOR_CONNECT) {
+			/*
+			 * This is an outbound connection.  Notify the consumer
+			 * that the connection has completed.
+			 */
+			if (ccn->ccn_on_connected != NULL) {
+				ccn->ccn_on_connected(ccn, CCONN_CB_CONNECTED);
+			}
+		}
+
 		/*
 		 * Trigger the incoming data routine.  This routine
 		 * will mark the socket for read if needed.
 		 */
 		ccn_handle_incoming_data(ccn, 0);
-		return;
+		goto release;
+
 
 	case CCONN_ST_WAITING_FOR_CONNECT:
 		VERIFY(ostate == CCONN_ST_PRE_CONNECTION);
@@ -223,7 +244,7 @@ top:
 		 * See also: connect(3SOCKET).
 		 */
 		cloop_ent_want(ccn->ccn_clent, CLOOP_CB_WRITE);
-		return;
+		goto release;
 
 	case CCONN_ST_READ_EOF:
 		VERIFY(ostate == CCONN_ST_WAITING_FOR_DATA);
@@ -238,7 +259,7 @@ top:
 			nstate = CCONN_ST_CLOSED;
 			goto top;
 		}
-		return;
+		goto release;
 
 	case CCONN_ST_PRE_CONNECTION:
 		abort();
@@ -246,6 +267,13 @@ top:
 	}
 
 	abort();
+
+release:
+	VERIFY3S(ccn->ccn_callback_depth, >, 0);
+	if (--ccn->ccn_callback_depth == 0 &&
+	    ccn->ccn_state == CCONN_ST_CLOSED) {
+		cconn_destroy(ccn);
+	}
 }
 
 /*
@@ -303,7 +331,13 @@ cconn_fin(cconn_t *ccn)
 	}
 
 	ccn->ccn_sendq_end = B_TRUE;
-	cloop_ent_want(ccn->ccn_clent, CLOOP_CB_WRITE);
+	if (!ccn_sendq_finalised(ccn)) {
+		/*
+		 * If the sendq hasn't been completely flushed, we still
+		 * need to wait for POLLOUT.
+		 */
+		cloop_ent_want(ccn->ccn_clent, CLOOP_CB_WRITE);
+	}
 	return (0);
 }
 
@@ -422,6 +456,41 @@ cconn_on_error(cloop_ent_t *clent, int ev)
 	cconn_advance_state(ccn, CCONN_ST_ERROR);
 }
 
+static boolean_t
+ccn_sendq_finalised(cconn_t *ccn)
+{
+	if (cbufq_peek(ccn->ccn_sendq) != NULL || !ccn->ccn_sendq_end) {
+		/*
+		 * Either the sendq is not empty, or if it is empty it is not
+		 * marked as ended.
+		 */
+		return (B_FALSE);
+	}
+
+	/*
+	 * The outbound queue is empty _and_ we have no more data to send.
+	 * Proceed with a FIN.
+	 */
+	if (cserver_debug) {
+		fprintf(stderr, "CCONN[%p] SHUTDOWN WRITES\n", ccn);
+	}
+	if (shutdown(cloop_ent_fd(ccn->ccn_clent), SHUT_WR) != 0) {
+		warn("shutdown(SHUT_WR)");
+		cconn_advance_state(ccn, CCONN_ST_ERROR);
+		return (B_TRUE);
+	}
+	ccn->ccn_sendq_flushed = B_TRUE;
+
+	if (ccn->ccn_state == CCONN_ST_READ_EOF) {
+		/*
+		 * If the read side has already shut down, we can close the
+		 * whole connection now.
+		 */
+		cconn_advance_state(ccn, CCONN_ST_CLOSED);
+	}
+	return (B_TRUE);
+}
+
 void
 cconn_on_write(cloop_ent_t *clent, int ev)
 {
@@ -454,43 +523,17 @@ cconn_on_write(cloop_ent_t *clent, int ev)
 		 * connection.
 		 */
 		cconn_advance_state(ccn, CCONN_ST_WAITING_FOR_DATA);
-
-		if (ccn->ccn_on_connected != NULL) {
-			ccn->ccn_on_connected(ccn, CCONN_CB_CONNECTED);
-		}
 	}
 
 	if (cserver_debug) {
 		fprintf(stderr, "CCONN[%p] WRITE DATA\n", ccn);
 	}
 
-	boolean_t qempty = (cbufq_peek(ccn->ccn_sendq) == NULL);
-	if (qempty) {
-		if (!ccn->ccn_sendq_end) {
-			/*
-			 * Nothing to send.
-			 */
-			return;
-		}
-
+	if (ccn_sendq_finalised(ccn)) {
 		/*
-		 * The outbound queue is empty _and_ we have no more data to
-		 * send.  Proceed with a FIN.
+		 * The sendq has been completely flushed and we have
+		 * shut down the socket for writes.
 		 */
-		if (shutdown(cloop_ent_fd(clent), SHUT_WR) != 0) {
-			warn("shutdown(SHUT_WR)");
-			cconn_advance_state(ccn, CCONN_ST_ERROR);
-			return;
-		}
-		ccn->ccn_sendq_flushed = B_TRUE;
-
-		if (ccn->ccn_state == CCONN_ST_READ_EOF) {
-			/*
-			 * If the read side has already shut down,
-			 * we can close the whole connection now.
-			 */
-			cconn_advance_state(ccn, CCONN_ST_CLOSED);
-		}
 		return;
 	}
 
@@ -499,14 +542,23 @@ cconn_on_write(cloop_ent_t *clent, int ev)
 		size_t actual = 0;
 		size_t want;
 
+		if (cserver_debug) {
+			cbufq_dump(ccn->ccn_sendq, stderr);
+		}
+
 		if ((want = cbuf_available(head)) < 1) {
 			cbuf_free(cbufq_deq(ccn->ccn_sendq));
 			continue;
 		}
+		if (cserver_debug) {
+			fprintf(stderr, "CCONN[%p] WRITE DATA: HAVE %d; "
+			    "Q %d\n", ccn, want,
+			    cbufq_available(ccn->ccn_sendq));
+		}
 
 retry:
-		if (cbuf_sys_write(head, cloop_ent_fd(clent),
-		    CBUF_SYSREAD_ENTIRE, &actual) != 0) {
+		if (cbuf_sys_send(head, cloop_ent_fd(clent),
+		    CBUF_SYSREAD_ENTIRE, &actual, MSG_NOSIGNAL) != 0) {
 			switch (errno) {
 			case EINTR:
 				goto retry;
@@ -515,20 +567,42 @@ retry:
 				cloop_ent_want(clent, CLOOP_CB_WRITE);
 				return;
 
+			case ECONNREFUSED:
+				if (cserver_debug) {
+					fprintf(stderr, "CCONN[%p] "
+					    "ECONNREFUSED\n", ccn);
+				}
+				cconn_advance_state(ccn, CCONN_ST_ERROR);
+				return;
+
+			case EPIPE:
+				if (cserver_debug) {
+					fprintf(stderr, "CCONN[%p] "
+					    "EPIPE\n", ccn);
+				}
+				cconn_advance_state(ccn, CCONN_ST_ERROR);
+				return;
+
 			case ECONNRESET:
 				if (cserver_debug) {
 					fprintf(stderr, "CCONN[%p] "
 					    "ECONNRESET\n", ccn);
 				}
+				cconn_advance_state(ccn, CCONN_ST_ERROR);
 				return;
 
 			default:
-				err(1, "cbuf_sys_write");
+				err(1, "cbuf_sys_send");
 			}
 		}
 	}
 
-	cloop_ent_want(clent, CLOOP_CB_WRITE);
+	if (cbufq_peek(ccn->ccn_sendq) != NULL) {
+		/*
+		 * The sendq is not empty, so we must poll for writes.
+		 */
+		cloop_ent_want(clent, CLOOP_CB_WRITE);
+	}
 }
 
 void

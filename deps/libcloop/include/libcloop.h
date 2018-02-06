@@ -106,6 +106,7 @@ extern int cconn_abort(cconn_t *ccn);
 extern void *cconn_data(cconn_t *ccn);
 extern void cconn_data_set(cconn_t *ccn, void *data);
 
+extern const struct sockaddr_in *cconn_sockaddr_in(cconn_t *ccn);
 extern const char *cconn_remote_addr_str(cconn_t *ccn);
 
 #endif	/* !_LIBCLOOP_H */
