@@ -7,7 +7,12 @@ PROG =		bbal
 
 OBJS =		main.o \
 		cloop.o \
-		cserver.o
+		cserver.o \
+		tcp_proxy.o \
+		udp_proxy.o \
+		backend.o
+
+HEADERS =	bbal.h
 
 DEPS_LIBS =	illumos_list.a \
 		libcbuf.a \
@@ -19,7 +24,6 @@ INCS =		$(TOP)/deps/illumos-list/include \
 		$(TOP)/deps/libcbuf/include \
 		$(TOP)/deps/libcloop/include \
 		$(TOP)/deps/illumos-bunyan/include
-
 
 CFLAGS =	-Wall -Wextra -Werror \
 		-Wno-unused-parameter \
@@ -37,7 +41,7 @@ $(PROG): $(OBJS:%=$(OBJ_DIR)/%) $(DEPS_LIBS:%=$(OBJ_DIR)/%)
 $(OBJ_DIR):
 	mkdir -p $@
 
-$(OBJ_DIR)/%.o: %.c | $(OBJ_DIR)
+$(OBJ_DIR)/%.o: %.c $(HEADERS) | $(OBJ_DIR)
 	gcc -c $(CFLAGS) -o $@ $<
 
 $(OBJ_DIR)/%.o: deps/libcloop/src/%.c | $(OBJ_DIR)
