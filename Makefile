@@ -10,17 +10,20 @@ OBJS =		main.o \
 		cserver.o
 
 DEPS_LIBS =	illumos_list.a \
-		libcbuf.a
+		libcbuf.a \
+		illumos_bunyan.a
 
-LIBS =		$(DEPS_LIBS:%=$(OBJ_DIR)/%) -lnsl -lsocket -lumem -lavl
+LIBS =		$(DEPS_LIBS:%=$(OBJ_DIR)/%) -lnsl -lsocket -lumem -lavl -lnvpair
 
 INCS =		$(TOP)/deps/illumos-list/include \
 		$(TOP)/deps/libcbuf/include \
-		$(TOP)/deps/libcloop/include
+		$(TOP)/deps/libcloop/include \
+		$(TOP)/deps/illumos-bunyan/include
+
 
 CFLAGS =	-Wall -Wextra -Werror \
 		-Wno-unused-parameter \
-		-std=c99 -D__EXTENSIONS__ \
+		-std=c99 -D__EXTENSIONS__ -pthread \
 		-O0 -gdwarf-2 \
 		$(INCS:%=-I%)
 		#-I$(TOP)/deps/smartos/include \
@@ -28,7 +31,7 @@ CFLAGS =	-Wall -Wextra -Werror \
 OBJ_DIR =	obj
 
 $(PROG): $(OBJS:%=$(OBJ_DIR)/%) $(DEPS_LIBS:%=$(OBJ_DIR)/%)
-	gcc $(CFLAGS) -o $@ $(OBJS:%=$(OBJ_DIR)/%) $(LIBS)
+	gcc $(CFLAGS) -o $@ $(OBJS:%=$(OBJ_DIR)/%) $(OBJ_DIR)/bunyan_provider.o $(LIBS)
 	/opt/ctf/bin/ctfconvert -o $@ $@
 
 $(OBJ_DIR):
@@ -44,11 +47,16 @@ $(OBJ_DIR)/%.o: deps/libcloop/src/%.c | $(OBJ_DIR)
 #	gcc -c $(CFLAGS) -o $@ $<
 
 $(OBJ_DIR)/illumos_list.a: | deps/illumos-list/.git $(OBJ_DIR)
-	cd deps/illumos-list && $(MAKE) BUILD_DIR=$(TOP)/$(OBJ_DIR)
+	cd deps/illumos-list && $(MAKE) BUILD_DIR=$(TOP)/$(OBJ_DIR) \
+	    EXTRA_CFLAGS=-pthread
+
+$(OBJ_DIR)/illumos_bunyan.a: | deps/illumos-bunyan/.git $(OBJ_DIR)
+	cd deps/illumos-bunyan && $(MAKE) BUILD_DIR=$(TOP)/$(OBJ_DIR) \
+	    EXTRA_CFLAGS=-pthread
 
 $(OBJ_DIR)/libcbuf.a: | deps/libcbuf/.git $(OBJ_DIR)
 	cd deps/libcbuf && $(MAKE) OBJ_DIR=$(TOP)/$(OBJ_DIR) \
-	    DESTDIR=$(TOP)/$(OBJ_DIR)
+	    DESTDIR=$(TOP)/$(OBJ_DIR) EXTRA_CFLAGS=-pthread
 
 deps/%/.git:
 	git submodule update --init --recursive

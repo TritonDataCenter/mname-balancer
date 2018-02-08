@@ -23,6 +23,9 @@
 
 #include <libcbuf.h>
 #include <libcloop.h>
+#include <bunyan.h>
+
+bunyan_logger_t *g_log;
 
 int g_sock = -1;
 
@@ -39,6 +42,8 @@ typedef struct {
 	list_node_t be_link;
 
 	cbufq_t *be_input;
+
+	bunyan_logger_t *be_log;
 } backend_t;
 
 list_t g_backends;
@@ -77,6 +82,15 @@ backends_init(cloop_t *loop)
 	be->be_path = strdup("/tmp/bbal.0");
 	be->be_ok = B_FALSE;
 	be->be_reconnect = B_TRUE;
+
+	if (bunyan_child(g_log, &be->be_log,
+	    BUNYAN_T_INT32, "be_id", be->be_id,
+	    BUNYAN_T_STRING, "be_path", be->be_path,
+	    BUNYAN_T_END) != 0) {
+		cbufq_free(be->be_input);
+		free(be);
+		return (-1);
+	}
 
 	list_insert_tail(&g_backends, be);
 
@@ -195,7 +209,7 @@ bbal_uds_data(cconn_t *ccn, int event)
 		}
 
 		size_t avail = cbufq_available(q);
-		if (avail < 4) {
+		if (avail < sizeof (uint32_t)) {
 			/*
 			 * We need at least four bytes in order to read the
 			 * frame type.
@@ -204,7 +218,7 @@ bbal_uds_data(cconn_t *ccn, int event)
 			return;
 		}
 
-		if (cbufq_pullup(q, 4) != 0) {
+		if (cbufq_pullup(q, sizeof (uint32_t)) != 0) {
 			err(1, "cbufq_pullup");
 			return;
 		}
@@ -220,7 +234,9 @@ bbal_uds_data(cconn_t *ccn, int event)
 		uint32_t frame_type;
 		VERIFY0(cbuf_get_u32(cbuf, &frame_type));
 
-		fprintf(stdout, "\tframe type %u\n", frame_type);
+		bunyan_trace(be->be_log, "inbound frame",
+		    BUNYAN_T_UINT32, "frame_type", frame_type,
+		    BUNYAN_T_END);
 
 		if (frame_type == 1001) {
 			/*
@@ -231,13 +247,14 @@ bbal_uds_data(cconn_t *ccn, int event)
 		}
 
 		if (frame_type != 1002) {
+			bunyan_error(be->be_log, "invalid frame type",
+			    BUNYAN_T_UINT32, "frame_type", frame_type,
+			    BUNYAN_T_END);
 			cconn_abort(ccn);
 			return;
 		}
 
-		fprintf(stdout, "\tavail %d\n", cbufq_available(q));
-
-		if (cbufq_available(q) < 3 * 4) {
+		if (cbufq_available(q) < 3 * sizeof (uint32_t)) {
 			/*
 			 * This frame has three uint32_t values after the
 			 * frame type, but they have not yet arrived.
@@ -246,7 +263,7 @@ bbal_uds_data(cconn_t *ccn, int event)
 			break;
 		}
 
-		if (cbufq_pullup(q, 3 * 4) != 0) {
+		if (cbufq_pullup(q, 3 * sizeof (uint32_t)) != 0) {
 			err(1, "cbufq_pullup");
 			return;
 		}
@@ -259,9 +276,6 @@ bbal_uds_data(cconn_t *ccn, int event)
 		VERIFY0(cbuf_get_u32(cbuf, &ipaddr));
 		VERIFY0(cbuf_get_u32(cbuf, &port));
 		VERIFY0(cbuf_get_u32(cbuf, &datalen));
-
-		fprintf(stdout, "\t\tipaddr %x port %d datalen %d\n",
-		    ipaddr, port, datalen);
 
 		if (cbufq_pullup(q, datalen) != 0) {
 			/*
@@ -278,10 +292,33 @@ bbal_uds_data(cconn_t *ccn, int event)
 		sin.sin_addr.s_addr = htonl(ipaddr);
 		sin.sin_port = htons(port);
 
+		bunyan_trace(be->be_log, "outbound UDP packet",
+		    BUNYAN_T_IP, "dest_ip", &sin.sin_addr,
+		    BUNYAN_T_UINT32, "dest_port", port,
+		    BUNYAN_T_UINT32, "data_len", datalen,
+		    BUNYAN_T_END);
+
 		size_t actual;
+again:
 		if (cbuf_sys_sendto(cbuf, g_sock, datalen, &actual,
 		    MSG_NOSIGNAL, (struct sockaddr *)&sin, sizeof (sin)) != 0) {
-			err(1, "cbuf_sys_sendto");
+			if (errno == EINTR) {
+				goto again;
+			}
+
+			bunyan_error(be->be_log, "outbound UDP packet error",
+			    BUNYAN_T_IP, "dest_ip", &sin.sin_addr,
+			    BUNYAN_T_UINT32, "dest_port", port,
+			    BUNYAN_T_UINT32, "data_len", datalen,
+			    BUNYAN_T_INT32, "errno", (int32_t)errno,
+			    BUNYAN_T_STRING, "strerror", strerror(errno),
+			    BUNYAN_T_END);
+
+			/*
+			 * These are UDP packets; treat this one as if it were
+			 * dropped.
+			 */
+			VERIFY0(cbuf_skip(cbuf, datalen));
 		}
 		VERIFY3U(actual, ==, datalen);
 	}
@@ -296,9 +333,7 @@ bbal_uds_connected(cconn_t *ccn, int event)
 
 	VERIFY(!be->be_ok);
 
-	fprintf(stdout, "[BE %d] connected!\n", be->be_id);
-
-	fprintf(stdout, "\tsending HELLO frame\n");
+	bunyan_info(be->be_log, "backend socket connected", BUNYAN_T_END);
 
 	cbuf_t *buf;
 	if (cbuf_alloc(&buf, 4) != 0) {
@@ -307,10 +342,11 @@ bbal_uds_connected(cconn_t *ccn, int event)
 	cbuf_byteorder_set(buf, CBUF_ORDER_LITTLE_ENDIAN);
 	VERIFY0(cbuf_put_u32(buf, 1));
 
-	cbuf_dump(buf, stdout);
-
 	if (cconn_send(ccn, buf) != 0) {
-		warn("send backend %d", be->be_id);
+		bunyan_error(be->be_log, "sending hello frame",
+		    BUNYAN_T_INT32, "errno", (int32_t)errno,
+		    BUNYAN_T_STRING, "strerror", strerror(errno),
+		    BUNYAN_T_END);
 		goto close_be;
 	}
 
@@ -326,7 +362,8 @@ bbal_uds_end(cconn_t *ccn, int event)
 {
 	backend_t *be = cconn_data(ccn);
 
-	fprintf(stdout, "[BE %d] ended!\n", be->be_id);
+	bunyan_info(be->be_log, "backend socket EOF", BUNYAN_T_END);
+
 	be->be_ok = B_FALSE;
 	cconn_fin(ccn);
 }
@@ -336,7 +373,8 @@ bbal_uds_error(cconn_t *ccn, int event)
 {
 	backend_t *be = cconn_data(ccn);
 
-	fprintf(stdout, "[BE %d] error!\n", be->be_id);
+	bunyan_error(be->be_log, "backend socket error", BUNYAN_T_END);
+
 	be->be_ok = B_FALSE;
 }
 
@@ -345,7 +383,8 @@ bbal_uds_close(cconn_t *ccn, int event)
 {
 	backend_t *be = cconn_data(ccn);
 
-	fprintf(stdout, "[BE %d] closed!\n", be->be_id);
+	bunyan_info(be->be_log, "backend socket closed", BUNYAN_T_END);
+
 	be->be_ok = B_FALSE;
 	be->be_reconnect = B_TRUE;
 
@@ -365,7 +404,10 @@ bbal_connect_uds_common(backend_t *be, int *sockp)
 	if ((sock = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC,
 	    0)) < 0) {
 		e = errno;
-		warn("socket failed");
+		bunyan_error(be->be_log, "socket(2) failed",
+		    BUNYAN_T_INT32, "errno", e,
+		    BUNYAN_T_STRING, "strerror", strerror(e),
+		    BUNYAN_T_END);
 		goto fail;
 	}
 
@@ -376,7 +418,11 @@ bbal_connect_uds_common(backend_t *be, int *sockp)
 	if (connect(sock, (struct sockaddr *)&sun, sizeof (sun)) != 0 &&
 	    errno != EINPROGRESS) {
 		e = errno;
-		warn("connect failed");
+		bunyan_error(be->be_log, "connect(3SOCKET) failed",
+		    BUNYAN_T_STRING, "socket_path", be->be_path,
+		    BUNYAN_T_INT32, "errno", e,
+		    BUNYAN_T_STRING, "strerror", strerror(e),
+		    BUNYAN_T_END);
 		goto fail;
 	}
 
@@ -400,7 +446,10 @@ bbal_connect_uds_tcp(backend_t *be, cconn_t **ccnp)
 	cconn_t *ccn;
 
 	if (cconn_alloc(&ccn) != 0) {
-		warn("cconn_alloc");
+		bunyan_error(be->be_log, "cconn_alloc for TCP failed",
+		    BUNYAN_T_INT32, "errno", errno,
+		    BUNYAN_T_STRING, "strerror", strerror(errno),
+		    BUNYAN_T_END);
 		return (-1);
 	}
 	cconn_byteorder_set(ccn, CBUF_ORDER_LITTLE_ENDIAN);
@@ -434,7 +483,10 @@ bbal_connect_uds(backend_t *be)
 	cconn_destroy(be->be_conn);
 	if (cconn_alloc(&be->be_conn) != 0) {
 		e = errno;
-		warn("cconn_alloc");
+		bunyan_error(be->be_log, "cconn_alloc for UDP failed",
+		    BUNYAN_T_INT32, "errno", e,
+		    BUNYAN_T_STRING, "strerror", strerror(e),
+		    BUNYAN_T_END);
 		goto fail;
 	}
 	cconn_byteorder_set(be->be_conn, CBUF_ORDER_LITTLE_ENDIAN);
@@ -502,8 +554,10 @@ bbal_listen_udp(const char *ipaddr, const char *port, int *sockp)
 		goto fail;
 	}
 
-	fprintf(stdout, "UDP listen socket bound (%s:%s) -> %d\n", ipaddr, port,
-	    sock);
+	bunyan_info(g_log, "listening for UDP packets",
+	    BUNYAN_T_STRING, "address", ipaddr,
+	    BUNYAN_T_STRING, "port", port,
+	    BUNYAN_T_END);
 
 	*sockp = sock;
 	return (0);
@@ -529,6 +583,9 @@ run_timer(cloop_ent_t *ent, int event)
 		if (be->be_reconnect) {
 			VERIFY(!be->be_ok);
 
+			bunyan_debug(be->be_log, "reconnecting to backend",
+			    BUNYAN_T_END);
+
 			if (bbal_connect_uds(be) == -1) {
 				warn("bbal_connect_uds from run_timer");
 				continue;
@@ -550,7 +607,7 @@ bbal_udp_read(cloop_ent_t *ent, int event)
 		return;
 	}
 	cbuf_byteorder_set(buf, CBUF_ORDER_LITTLE_ENDIAN);
-	size_t hdrsz = 4 * 4;
+	size_t hdrsz = 4 * sizeof (uint32_t);
 	VERIFY0(cbuf_position_set(buf, hdrsz));
 
 	/*
@@ -596,7 +653,7 @@ bbal_udp_read(cloop_ent_t *ent, int event)
 	 * header.
 	 */
 	size_t p = cbuf_position(buf);
-	VERIFY0(cbuf_position_set(buf, 0));
+	cbuf_rewind(buf);
 
 	VERIFY0(cbuf_put_u32(buf, 2)); /* FRAME TYPE */
 	VERIFY0(cbuf_put_u32(buf, ntohl(sin->sin_addr.s_addr))); /* IP */
@@ -783,8 +840,10 @@ bbal_tcp_incoming(cserver_t *cserver, int event)
 		}
 		return;
 	}
-	fprintf(stdout, "\tTCP inbound from %s\n",
-	    cconn_remote_addr_str(prx->prx_front));
+
+	bunyan_debug(g_log, "inbound TCP connection",
+	    BUNYAN_T_STRING, "address", cconn_remote_addr_str(prx->prx_front),
+	    BUNYAN_T_END);
 
 	/*
 	 * Select a backend for the remote peer.
@@ -831,35 +890,42 @@ fail:
 int
 main(int argc, char *argv[])
 {
-	int port = -1;
 	cloop_t *loop = NULL;
 	cloop_ent_t *timer = NULL;
 	cloop_ent_t *udp = NULL;
 	cserver_t *tcp = NULL;
+	const char *listen_ip = "0.0.0.0";
+	const char *listen_port = "10053";
+
+	if (bunyan_init("bbal", &g_log) != 0) {
+		err(1, "bunyan_init");
+	}
+	if (bunyan_stream_add(g_log, "stdout", BUNYAN_L_TRACE,
+	    bunyan_stream_fd, (void *)STDOUT_FILENO) != 0) {
+		err(1, "bunyan_stream_add");
+	}
+
+	(void) bunyan_info(g_log, "starting up", BUNYAN_T_END);
 
 	if (cloop_alloc(&loop) != 0 || cloop_ent_alloc(&udp) != 0 ||
 	    cloop_ent_alloc(&timer) != 0 || cserver_alloc(&tcp) != 0) {
-		warn("cloop init");
-		goto fail;
+		err(1, "cloop init");
 	}
 
 	if (backends_init(loop) != 0 || remotes_init() != 0) {
-		warn("data init");
-		goto fail;
+		err(1, "data init");
 	}
 
 	if (cloop_attach_ent_timer(loop, timer, 1) != 0) {
-		warn("bbal_timer_init");
-		goto fail;
+		err(1, "timer init");
 	}
 	cloop_ent_on(timer, CLOOP_CB_TIMER, run_timer);
 
 	/*
 	 * Listen on the UDP DNS port.
 	 */
-	if (bbal_listen_udp("0.0.0.0", "10053", &g_sock) != 0) {
-		warn("bbal_listen_udp");
-		goto fail;
+	if (bbal_listen_udp(listen_ip, listen_port, &g_sock) != 0) {
+		err(1, "bbal_listen_udp");
 	}
 
 	cloop_attach_ent(loop, udp, g_sock);
@@ -871,36 +937,33 @@ main(int argc, char *argv[])
 	 * Listen on the TCP DNS port.
 	 */
 	cserver_on(tcp, CSERVER_CB_INCOMING, bbal_tcp_incoming);
-	if (cserver_listen_tcp(tcp, loop, "0.0.0.0", "10053") != 0) {
+	if (cserver_listen_tcp(tcp, loop, listen_ip, listen_port) != 0) {
 		err(1, "cserver_listen");
 	}
+
+	bunyan_info(g_log, "listening for TCP packets",
+	    BUNYAN_T_STRING, "address", listen_ip,
+	    BUNYAN_T_STRING, "port", listen_port,
+	    BUNYAN_T_END);
 
 	int loopc = 0;
 	for (;;) {
 		unsigned int again = 0;
 
-		fprintf(stderr, "--------- LOOP %d\n", ++loopc);
+		bunyan_trace(g_log, "event loop",
+		    BUNYAN_T_INT32, "count", ++loopc,
+		    BUNYAN_T_END);
 		if (cloop_run(loop, &again) != 0) {
-			warn("cloop_run");
-			goto fail;
+			err(1, "cloop_run");
 		}
 
-		if (!again) {
-			warnx("LOOP ENDED?");
-			goto fail;
-		}
+		/*
+		 * The event loop should always have work to do, as we have
+		 * registered a persistent timer and have a persistent open
+		 * listen socket.
+		 */
+		VERIFY3U(again, !=, 0);
 	}
 
-	return (0);
-
-fail:
-	if (port != -1) {
-		VERIFY0(close(port));
-	}
-	if (g_sock != -1) {
-		VERIFY0(close(g_sock));
-	}
-	return (1);
+	abort();
 }
-
-
