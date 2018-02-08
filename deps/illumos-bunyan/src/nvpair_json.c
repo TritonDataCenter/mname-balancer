@@ -479,6 +479,23 @@ nvlist_dump_json(nvlist_t *nvl, char **bufp)
 	return (nvlist_do_json(nvl, bufp, &l, &off));
 }
 
+int
+nvlist_dump_json_nl(nvlist_t *nvl, char **bufp)
+{
+	off_t off = 0;
+	size_t l = 0;
+	int ret;
+
+	*bufp = NULL;
+	if (nvlist_do_json(nvl, bufp, &l, &off) != 0) {
+		return (-1);
+	}
+	FPRINTF(bufp, &l, &off, "\n");
+
+	return (0);
+}
+
+
 /* ARGSUSED */
 void
 nvlist_dump_json_free(nvlist_t *nvl, char *buf)

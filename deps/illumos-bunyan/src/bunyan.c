@@ -89,21 +89,23 @@ bunyan_init(const char *name, bunyan_logger_t **bhp)
 	bunyan_t *b;
 	size_t nlen = strlen(name) + 1;
 
-	b = umem_zalloc(sizeof (bunyan_t), UMEM_DEFAULT);
-	if (b == NULL)
-		return (ENOMEM);
+	if ((b = umem_zalloc(sizeof (bunyan_t), UMEM_DEFAULT)) == NULL) {
+		errno = ENOMEM;
+		return (-1);
+	}
 
-	b->bun_name = umem_alloc(nlen, UMEM_DEFAULT);
-	if (b->bun_name == NULL) {
+	if ((b->bun_name = umem_alloc(nlen, UMEM_DEFAULT)) == NULL) {
 		umem_free(b, sizeof (bunyan_t));
-		return (ENOMEM);
+		errno = ENOMEM;
+		return (-1);
 	}
 	bcopy(name, b->bun_name, nlen);
 
 	if ((ret = pthread_mutex_init(&b->bun_lock, NULL)) != 0) {
 		umem_free(b->bun_name, nlen);
 		umem_free(b, sizeof (bunyan_t));
-		return (ret);
+		errno = ret;
+		return (-1);
 	}
 
 	VERIFY(gethostname(b->bun_host, sizeof (b->bun_host)) == 0);
@@ -119,6 +121,7 @@ bunyan_fini(bunyan_logger_t *bhp)
 	bunyan_t *b = (bunyan_t *)bhp;
 	bunyan_key_t *bkp;
 	bunyan_stream_t *bsp;
+	int preserve = errno;
 
 	while ((bkp = b->bun_keys) != NULL) {
 		b->bun_keys = bkp->bk_next;
@@ -135,6 +138,8 @@ bunyan_fini(bunyan_logger_t *bhp)
 
 	VERIFY(pthread_mutex_destroy(&b->bun_lock) == 0);
 	umem_free(b, sizeof (bunyan_t));
+
+	errno = preserve;
 }
 
 /* ARGSUSED */
@@ -162,11 +167,6 @@ bunyan_stream_fd(nvlist_t *nvl, const char *js, void *arg)
 		off += ret;
 	}
 
-	if (ret < 0) {
-		(void) write(fd, "\n", 1);
-	} else {
-		ret = write(fd, "\n", 1);
-	}
 	return (ret < 0 ? 1: 0);
 }
 
@@ -183,17 +183,20 @@ bunyan_stream_add(bunyan_logger_t *bhp, const char *name, int level,
 	    level != BUNYAN_L_INFO &&
 	    level != BUNYAN_L_WARN &&
 	    level != BUNYAN_L_ERROR &&
-	    level != BUNYAN_L_FATAL)
-		return (EINVAL);
+	    level != BUNYAN_L_FATAL) {
+		errno = EINVAL;
+		return (-1);
+	}
 
-	bs = umem_alloc(sizeof (bunyan_stream_t), UMEM_DEFAULT);
-	if (bs == NULL)
-		return (ENOMEM);
+	if ((bs = umem_alloc(sizeof (bunyan_stream_t), UMEM_DEFAULT)) == NULL) {
+		errno = ENOMEM;
+		return (-1);
+	}
 
-	bs->bs_name = umem_alloc(nlen, UMEM_DEFAULT);
-	if (bs->bs_name == NULL) {
+	if ((bs->bs_name = umem_alloc(nlen, UMEM_DEFAULT)) == NULL) {
 		umem_free(bs, sizeof (bunyan_stream_t));
-		return (ENOMEM);
+		errno = ENOMEM;
+		return (-1);
 	}
 	bcopy(name, bs->bs_name, nlen);
 	bs->bs_level = level;
@@ -207,7 +210,8 @@ bunyan_stream_add(bunyan_logger_t *bhp, const char *name, int level,
 			(void) pthread_mutex_unlock(&b->bun_lock);
 			umem_free(bs->bs_name, nlen);
 			umem_free(bs, sizeof (bunyan_stream_t));
-			return (EEXIST);
+			errno = EEXIST;
+			return (-1);
 		}
 		cur = cur->bs_next;
 	}
@@ -235,7 +239,8 @@ bunyan_stream_remove(bunyan_logger_t *bhp, const char *name)
 	}
 	if (cur == NULL) {
 		(void) pthread_mutex_unlock(&b->bun_lock);
-		return (ENOENT);
+		errno = ENOENT;
+		return (-1);
 	}
 	if (prev == NULL)
 		b->bun_streams = cur->bs_next;
@@ -257,13 +262,14 @@ bunyan_key_add_one(bunyan_t *b, const char *name, bunyan_type_t type,
 	size_t nlen = strlen(name) + 1;
 	size_t blen;
 
-	bkp = umem_alloc(sizeof (bunyan_key_t), UMEM_DEFAULT);
-	if (bkp == NULL)
-		return (ENOMEM);
-	bkp->bk_name = umem_alloc(nlen, UMEM_DEFAULT);
-	if (bkp->bk_name == NULL) {
+	if ((bkp = umem_alloc(sizeof (bunyan_key_t), UMEM_DEFAULT)) == NULL) {
+		errno = ENOMEM;
+		return (-1);
+	}
+	if ((bkp->bk_name = umem_alloc(nlen, UMEM_DEFAULT)) == NULL) {
 		umem_free(bkp, sizeof (bunyan_key_t));
-		return (ENOMEM);
+		errno = ENOMEM;
+		return (-1);
 	}
 	bcopy(name, bkp->bk_name, nlen);
 
@@ -303,14 +309,15 @@ bunyan_key_add_one(bunyan_t *b, const char *name, bunyan_type_t type,
 	default:
 		umem_free(bkp->bk_name, nlen);
 		umem_free(bkp, sizeof (bunyan_key_t));
-		return (EINVAL);
+		errno = EINVAL;
+		return (-1);
 	}
 
-	bkp->bk_data = umem_alloc(blen, UMEM_DEFAULT);
-	if (bkp->bk_data == NULL) {
+	if ((bkp->bk_data = umem_alloc(blen, UMEM_DEFAULT)) == NULL) {
 		umem_free(bkp->bk_name, nlen);
 		umem_free(bkp, sizeof (bunyan_key_t));
-		return (ENOMEM);
+		errno = ENOMEM;
+		return (-1);
 	}
 	bcopy(arg, bkp->bk_data, blen);
 	bkp->bk_len = blen;
@@ -394,7 +401,8 @@ bunyan_key_vadd(bunyan_t *b, va_list *ap)
 			data = &d;
 			break;
 		default:
-			return (EINVAL);
+			errno = EINVAL;
+			return (-1);
 		}
 
 		if ((ret = bunyan_key_add_one(b, name, type, data)) != 0)
@@ -436,7 +444,8 @@ bunyan_key_remove(bunyan_logger_t *bhp, const char *name)
 
 	if (cur == NULL) {
 		(void) pthread_mutex_unlock(&b->bun_lock);
-		return (ENOENT);
+		errno = ENOENT;
+		return (-1);
 	}
 
 	if (prev == NULL)
@@ -456,12 +465,15 @@ bunyan_key_dup(const bunyan_key_t *bkp)
 	size_t nlen = strlen(bkp->bk_name) + 1;
 
 	nkp = umem_alloc(sizeof (bunyan_key_t), UMEM_DEFAULT);
-	if (nkp == NULL)
+	if (nkp == NULL) {
+		errno = ENOMEM;
 		return (NULL);
+	}
 	nkp->bk_next = NULL;
 	nkp->bk_name = umem_alloc(nlen, UMEM_DEFAULT);
 	if (nkp->bk_name == NULL) {
 		umem_free(nkp, sizeof (bunyan_key_t));
+		errno = ENOMEM;
 		return (NULL);
 	}
 	bcopy(bkp->bk_name, nkp->bk_name, nlen);
@@ -470,6 +482,7 @@ bunyan_key_dup(const bunyan_key_t *bkp)
 	if (nkp->bk_data == NULL) {
 		umem_free(nkp->bk_name, nlen);
 		umem_free(nkp, sizeof (bunyan_key_t));
+		errno = ENOMEM;
 		return (NULL);
 	}
 	bcopy(bkp->bk_data, nkp->bk_data, bkp->bk_len);
@@ -485,13 +498,16 @@ bunyan_stream_dup(const bunyan_stream_t *bsp)
 	size_t nlen = strlen(bsp->bs_name) + 1;
 
 	nsp = umem_alloc(sizeof (bunyan_stream_t), UMEM_DEFAULT);
-	if (nsp == NULL)
+	if (nsp == NULL) {
+		errno = ENOMEM;
 		return (NULL);
+	}
 
 	nsp->bs_next = NULL;
 	nsp->bs_name = umem_alloc(nlen, UMEM_DEFAULT);
 	if (nsp->bs_name == NULL) {
 		umem_free(nsp, sizeof (bunyan_stream_t));
+		errno = ENOMEM;
 		return (NULL);
 	}
 	bcopy(bsp->bs_name, nsp->bs_name, nlen);
@@ -510,13 +526,17 @@ bunyan_dup(const bunyan_t *b)
 	const bunyan_key_t *bkp;
 	const bunyan_stream_t *bsp;
 	size_t nlen;
+	int r;
 
 	n = umem_zalloc(sizeof (bunyan_t), UMEM_DEFAULT);
-	if (n == NULL)
+	if (n == NULL) {
+		errno = ENOMEM;
 		return (NULL);
+	}
 
-	if (pthread_mutex_init(&n->bun_lock, NULL) != 0) {
+	if ((r = pthread_mutex_init(&n->bun_lock, NULL)) != 0) {
 		umem_free(n, sizeof (bunyan_t));
+		errno = r;
 		return (NULL);
 	}
 
@@ -535,7 +555,7 @@ bunyan_dup(const bunyan_t *b)
 	for (bsp = b->bun_streams; bsp != NULL; bsp = bsp->bs_next) {
 		bunyan_stream_t *nsp;
 		nsp = bunyan_stream_dup(bsp);
-		if (bsp == NULL) {
+		if (nsp == NULL) {
 			bunyan_fini((bunyan_logger_t *)n);
 			return (NULL);
 		}
@@ -565,8 +585,10 @@ bunyan_child(const bunyan_logger_t *bhp, bunyan_logger_t **outp, ...)
 	int ret;
 
 	n = bunyan_dup(b);
-	if (n == NULL)
-		return (ENOMEM);
+	if (n == NULL) {
+		errno = ENOMEM;
+		return (-1);
+	}
 
 	va_start(ap, outp);
 	ret = bunyan_key_vadd(n, &ap);
@@ -587,10 +609,10 @@ bunyan_iso_time(char *buf)
 	struct tm tm;
 
 	if (gettimeofday(&tv, NULL) != 0)
-		return (errno);
+		return (-1);
 
 	if (gmtime_r(&tv.tv_sec, &tm) == NULL)
-		return (errno);
+		return (-1);
 
 	VERIFY(strftime(buf, ISO_TIMELEN, "%FT%T", &tm) == 19);
 
@@ -621,8 +643,10 @@ bunyan_vlog_defaults(nvlist_t *nvl, bunyan_t *b, bunyan_level_t level,
 	    (ret = nvlist_add_int32(nvl, "pid", getpid()) != 0) ||
 	    (ret = nvlist_add_uint32(nvl, "tid", thr_self()) != 0) ||
 	    (ret = nvlist_add_string(nvl, "time", tbuf) != 0) ||
-	    (ret = nvlist_add_string(nvl, "msg", msg) != 0))
-		return (ret);
+	    (ret = nvlist_add_string(nvl, "msg", msg) != 0)) {
+		errno = ret;
+		return (-1);
+	}
 
 	return (0);
 }
@@ -691,7 +715,8 @@ bunyan_vlog_add(nvlist_t *nvl, const char *key, bunyan_type_t type, void *arg)
 		break;
 	}
 
-	return (ret);
+	errno = ret;
+	return (ret == 0 ? 0 : -1);
 }
 
 static int
@@ -705,14 +730,17 @@ bunyan_vlog(bunyan_logger_t *bhp, bunyan_level_t level, const char *msg,
 	char *buf = NULL;
 	bunyan_t *b = (bunyan_t *)bhp;
 
-	if (msg == NULL)
-		return (EINVAL);
+	if (msg == NULL) {
+		errno = EINVAL;
+		return (-1);
+	}
 
 	(void) pthread_mutex_lock(&b->bun_lock);
 
 	if ((ret = nvlist_alloc(&nvl, NV_UNIQUE_NAME, 0)) != 0) {
 		(void) pthread_mutex_unlock(&b->bun_lock);
-		return (ret);
+		errno = ret;
+		return (-1);
 	}
 
 	/*
@@ -791,7 +819,9 @@ bunyan_vlog(bunyan_logger_t *bhp, bunyan_level_t level, const char *msg,
 	if ((ret = bunyan_vlog_defaults(nvl, b, level, msg)) != 0)
 		goto out;
 
-	if (nvlist_dump_json(nvl, &buf) < 0) {
+	extern int nvlist_dump_json_nl(nvlist_t *, char **);
+
+	if (nvlist_dump_json_nl(nvl, &buf) < 0) {
 		ret = errno;
 		goto out;
 	}
@@ -830,7 +860,8 @@ out:
 		nvlist_dump_json_free(nvl, buf);
 	if (nvl != NULL)
 		nvlist_free(nvl);
-	return (ret);
+	errno = ret;
+	return (ret == 0 ? 0 : -1);
 }
 
 int
