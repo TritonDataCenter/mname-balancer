@@ -2,30 +2,30 @@
 #define	_LIBCLOOP_H
 
 typedef enum cloop_ent_cb_type {
-	CLOOP_CB_READ = 1,
-	CLOOP_CB_WRITE = 2,
-	CLOOP_CB_HANGUP = 3,
-	CLOOP_CB_ERROR = 4,
+	CLOOP_CB_READ = 1000,
+	CLOOP_CB_WRITE,
+	CLOOP_CB_HANGUP,
+	CLOOP_CB_ERROR,
 	CLOOP_CB_TIMER
 } cloop_ent_cb_type_t;
 
 typedef enum cloop_ent_type {
 	CLOOP_ENT_TYPE_NONE = 0,
-	CLOOP_ENT_TYPE_FD = 1,
+	CLOOP_ENT_TYPE_FD = 2000,
 	CLOOP_ENT_TYPE_TIMER
 } cloop_ent_type_t;
 
 typedef enum cserver_type {
 	CSERVER_TYPE_NONE = 0,
-	CSERVER_TYPE_TCP = 1,
+	CSERVER_TYPE_TCP = 3000,
 } cserver_type_t;
 
 typedef enum cserver_cb_type {
-	CSERVER_CB_INCOMING = 1,
+	CSERVER_CB_INCOMING = 4000,
 } cserver_cb_type_t;
 
 typedef enum cconn_cb_type {
-	CCONN_CB_CONNECTED = 1,
+	CCONN_CB_CONNECTED = 5000,
 	CCONN_CB_DATA_AVAILABLE,
 	CCONN_CB_ERROR,
 	CCONN_CB_END,
