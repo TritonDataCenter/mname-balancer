@@ -212,6 +212,7 @@ bbal_uds_error(cconn_t *ccn, int event)
 	backend_t *be = cconn_data(ccn);
 
 	bunyan_error(be->be_log, "backend socket error", BUNYAN_T_END);
+	be->be_stat_conn_error++;
 
 	be->be_ok = B_FALSE;
 }
@@ -253,6 +254,8 @@ bbal_connect_uds_common(backend_t *be, int *sockp)
 	sun.sun_family = AF_UNIX;
 	snprintf(sun.sun_path, sizeof (sun.sun_path), "%s", be->be_path);
 
+	be->be_stat_conn_start++;
+
 	if (connect(sock, (struct sockaddr *)&sun, sizeof (sun)) != 0 &&
 	    errno != EINPROGRESS) {
 		e = errno;
@@ -268,6 +271,7 @@ bbal_connect_uds_common(backend_t *be, int *sockp)
 	return (0);
 
 fail:
+	be->be_stat_conn_error++;
 	if (sock != -1) {
 		VERIFY0(close(sock));
 	}

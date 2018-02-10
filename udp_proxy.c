@@ -122,6 +122,13 @@ bbal_udp_read(cloop_ent_t *ent, int event)
 		return;
 	}
 	cbuf_byteorder_set(buf, CBUF_ORDER_LITTLE_ENDIAN);
+
+	/*
+	 * This packet needs a header, but the header includes the length of
+	 * the UDP packet data.  Move the buffer position forward so that we
+	 * leave room to come back and write the header after receiving the
+	 * packet.
+	 */
 	size_t hdrsz = 4 * sizeof (uint32_t);
 	VERIFY0(cbuf_position_set(buf, hdrsz));
 
@@ -131,11 +138,21 @@ bbal_udp_read(cloop_ent_t *ent, int event)
 	struct sockaddr_storage from;
 	socklen_t fromlen = sizeof (from);
 	size_t rsz;
+again:
 	if (cbuf_sys_recvfrom(buf, cloop_ent_fd(ent),
 	    CBUF_SYSREAD_ENTIRE, &rsz, 0, (struct sockaddr *)&from,
 	    &fromlen) != 0) {
-		warn("recvfrom failure");
-		goto bail;
+		switch (errno) {
+		case EINTR:
+			goto again;
+
+		case EAGAIN:
+			goto bail;
+
+		default:
+			warn("recvfrom failure");
+			goto bail;
+		}
 	}
 
 	struct sockaddr_in *sin = (struct sockaddr_in *)&from;
@@ -152,16 +169,15 @@ bbal_udp_read(cloop_ent_t *ent, int event)
 		goto bail;
 	}
 
-	backend_t *be = backend_lookup(rem->rem_backend);
+	backend_t *be = remote_backend(rem);
 	if (be == NULL) {
+		rem->rem_stat_udp_drop++;
 		fprintf(stdout, "\tno backend; drop\n");
 		goto bail;
 	}
 
-	if (!be->be_ok) {
-		fprintf(stdout, "\tbackend not ok; drop\n");
-		goto bail;
-	}
+	rem->rem_stat_udp++;
+	be->be_stat_udp++;
 
 	/*
 	 * Preserve the final position so that we can go back and add the
@@ -179,6 +195,7 @@ bbal_udp_read(cloop_ent_t *ent, int event)
 
 	fprintf(stdout, "\tbackend ok; sending\n");
 	if (cconn_send(be->be_conn, buf) != 0) {
+		rem->rem_stat_udp_drop++;
 		warn("send backend %d", be->be_id);
 
 		cconn_abort(be->be_conn);
