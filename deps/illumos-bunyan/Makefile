@@ -12,6 +12,8 @@ HEADERS =	include/bunyan.h $(PROVIDER_H)
 AR ?=		ar
 DTRACE ?=	dtrace
 
+CFLAGS +=	-std=c99 -D__EXTENSIONS__
+
 CPPFLAGS +=	-I./include
 CPPFLAGS +=	-I$(BUILD_DIR)
 

@@ -720,6 +720,39 @@ bunyan_vlog_add(nvlist_t *nvl, const char *key, bunyan_type_t type, void *arg)
 }
 
 static int
+bunyan_level_active(bunyan_logger_t *bhp, bunyan_level_t level)
+{
+	/*
+	 * First, check to see if any streams will output a log message of
+	 * this level.
+	 */
+	bunyan_t *b = (bunyan_t *)bhp;
+	for (bunyan_stream_t *bsp = b->bun_streams; bsp != NULL;
+	    bsp = bsp->bs_next) {
+		if (bsp->bs_level <= level) {
+			return (1);
+		}
+	}
+
+	switch (level) {
+	case BUNYAN_L_TRACE:
+		return (BUNYAN_LOG_TRACE_ENABLED());
+	case BUNYAN_L_DEBUG:
+		return (BUNYAN_LOG_DEBUG_ENABLED());
+	case BUNYAN_L_INFO:
+		return (BUNYAN_LOG_INFO_ENABLED());
+	case BUNYAN_L_WARN:
+		return (BUNYAN_LOG_WARN_ENABLED());
+	case BUNYAN_L_ERROR:
+		return (BUNYAN_LOG_ERROR_ENABLED());
+	case BUNYAN_L_FATAL:
+		return (BUNYAN_LOG_FATAL_ENABLED());
+	}
+
+	return (1);
+}
+
+static int
 bunyan_vlog(bunyan_logger_t *bhp, bunyan_level_t level, const char *msg,
     va_list *ap)
 {
@@ -870,6 +903,10 @@ bunyan_trace(bunyan_logger_t *bhp, const char *msg, ...)
 	va_list va;
 	int ret;
 
+	if (!bunyan_level_active(bhp, BUNYAN_L_TRACE)) {
+		return (0);
+	}
+
 	va_start(va, msg);
 	ret = bunyan_vlog(bhp, BUNYAN_L_TRACE, msg, &va);
 	va_end(va);
@@ -882,6 +919,10 @@ bunyan_debug(bunyan_logger_t *bhp, const char *msg, ...)
 {
 	va_list va;
 	int ret;
+
+	if (!bunyan_level_active(bhp, BUNYAN_L_DEBUG)) {
+		return (0);
+	}
 
 	va_start(va, msg);
 	ret = bunyan_vlog(bhp, BUNYAN_L_DEBUG, msg, &va);
@@ -896,6 +937,10 @@ bunyan_info(bunyan_logger_t *bhp, const char *msg, ...)
 	va_list va;
 	int ret;
 
+	if (!bunyan_level_active(bhp, BUNYAN_L_INFO)) {
+		return (0);
+	}
+
 	va_start(va, msg);
 	ret = bunyan_vlog(bhp, BUNYAN_L_INFO, msg, &va);
 	va_end(va);
@@ -908,6 +953,10 @@ bunyan_warn(bunyan_logger_t *bhp, const char *msg, ...)
 {
 	va_list va;
 	int ret;
+
+	if (!bunyan_level_active(bhp, BUNYAN_L_WARN)) {
+		return (0);
+	}
 
 	va_start(va, msg);
 	ret = bunyan_vlog(bhp, BUNYAN_L_WARN, msg, &va);
@@ -922,6 +971,10 @@ bunyan_error(bunyan_logger_t *bhp, const char *msg, ...)
 	va_list va;
 	int ret;
 
+	if (!bunyan_level_active(bhp, BUNYAN_L_ERROR)) {
+		return (0);
+	}
+
 	va_start(va, msg);
 	ret = bunyan_vlog(bhp, BUNYAN_L_ERROR, msg, &va);
 	va_end(va);
@@ -935,6 +988,10 @@ bunyan_fatal(bunyan_logger_t *bhp, const char *msg, ...)
 {
 	va_list va;
 	int ret;
+
+	if (!bunyan_level_active(bhp, BUNYAN_L_FATAL)) {
+		return (0);
+	}
 
 	va_start(va, msg);
 	ret = bunyan_vlog(bhp, BUNYAN_L_FATAL, msg, &va);
