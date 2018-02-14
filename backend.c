@@ -46,8 +46,7 @@ bbal_uds_data(cconn_t *ccn, int event)
 			cbuf_free(cbufq_deq(q));
 		}
 
-		size_t avail = cbufq_available(q);
-		if (avail < sizeof (uint32_t)) {
+		if (cbufq_available(q) < sizeof (uint32_t)) {
 			/*
 			 * We need at least four bytes in order to read the
 			 * frame type.
