@@ -475,7 +475,9 @@ ccn_sendq_finalised(cconn_t *ccn)
 		fprintf(stderr, "CCONN[%p] SHUTDOWN WRITES\n", ccn);
 	}
 	if (shutdown(cloop_ent_fd(ccn->ccn_clent), SHUT_WR) != 0) {
-		warn("shutdown(SHUT_WR)");
+		if (cserver_debug) {
+			warn("shutdown(SHUT_WR)");
+		}
 		cconn_advance_state(ccn, CCONN_ST_ERROR);
 		return (B_TRUE);
 	}
@@ -506,7 +508,9 @@ cconn_on_write(cloop_ent_t *clent, int ev)
 		size_t errsz = sizeof (err);
 		if (getsockopt(cloop_ent_fd(clent), SOL_SOCKET, SO_ERROR,
 		    &err, &errsz) != 0) {
-			warn("getsockopt");
+			if (cserver_debug) {
+				warn("getsockopt");
+			}
 			cconn_advance_state(ccn, CCONN_ST_ERROR);
 			return;
 		}
@@ -663,6 +667,7 @@ retry:
 			goto out;
 
 		case ECONNRESET:
+		case ECONNREFUSED:
 			cconn_advance_state(ccn, CCONN_ST_ERROR);
 			goto out;
 
@@ -830,7 +835,7 @@ retry:
 			goto fail;
 
 		default:
-			err(1, "accept4");
+			VERIFY3S(errno, ==, 0);
 		}
 	}
 
@@ -841,7 +846,9 @@ retry:
 	if (setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &opt_on,
 	    sizeof (opt_on)) != 0) {
 		e = errno;
-		warn("could not set SO_KEEPALIVE");
+		if (cserver_debug) {
+			warn("could not set SO_KEEPALIVE");
+		}
 		goto fail;
 	}
 	(void) setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &keepidle,
@@ -1062,11 +1069,15 @@ cserver_parse_ipv4addr(const char *ipaddr, const char *port,
 	case 1:
 		return (0);
 	case 0:
-		warnx("inet_pton (%s) invalid address", ipaddr);
+		if (cserver_debug) {
+			warnx("inet_pton (%s) invalid address", ipaddr);
+		}
 		errno = EPROTO;
 		return (-1);
 	default:
-		warn("inet_pton (%s) failure", ipaddr);
+		if (cserver_debug) {
+			warn("inet_pton (%s) failure", ipaddr);
+		}
 		return (-1);
 	}
 }
@@ -1093,7 +1104,9 @@ cserver_listen_tcp(cserver_t *csrv, cloop_t *cloop, const char *ipaddr,
 	if ((sock = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC,
 	    0)) < 0) {
 		e = errno;
-		warn("socket failed");
+		if (cserver_debug) {
+			warn("socket failed");
+		}
 		goto fail;
 	}
 
@@ -1104,7 +1117,9 @@ cserver_listen_tcp(cserver_t *csrv, cloop_t *cloop, const char *ipaddr,
 	if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt_on,
 	    sizeof (opt_on)) != 0) {
 		e = errno;
-		warn("could not set SO_REUSEADDR");
+		if (cserver_debug) {
+			warn("could not set SO_REUSEADDR");
+		}
 		goto fail;
 	}
 
@@ -1114,7 +1129,9 @@ cserver_listen_tcp(cserver_t *csrv, cloop_t *cloop, const char *ipaddr,
 	if (cserver_parse_ipv4addr(ipaddr != NULL ? ipaddr : "0.0.0.0", port,
 	    &addr) != 0) {
 		e = errno;
-		warn("cserver_parse_ipv4addr failed");
+		if (cserver_debug) {
+			warn("cserver_parse_ipv4addr failed");
+		}
 		goto fail;
 	}
 
@@ -1123,7 +1140,9 @@ cserver_listen_tcp(cserver_t *csrv, cloop_t *cloop, const char *ipaddr,
 	 */
 	if (bind(sock, (struct sockaddr *)&addr, sizeof (addr)) != 0) {
 		e = errno;
-		warn("bind failed");
+		if (cserver_debug) {
+			warn("bind failed");
+		}
 		goto fail;
 	}
 
@@ -1132,7 +1151,9 @@ cserver_listen_tcp(cserver_t *csrv, cloop_t *cloop, const char *ipaddr,
 	 */
 	if (listen(sock, 1000) != 0) {
 		e = errno;
-		warn("listen failed");
+		if (cserver_debug) {
+			warn("listen failed");
+		}
 		goto fail;
 	}
 
