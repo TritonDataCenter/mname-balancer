@@ -34,9 +34,12 @@ bunyan_logger_t *g_log;
 
 int g_sock = -1;
 
+char *g_backends_path;
+
+static avl_tree_t g_remotes;
 static avl_tree_t g_backends;
 static avl_tree_t g_backends_by_path;
-static backend_t *g_backend_last_assigned = NULL;
+static uint32_t g_backend_last_assigned = 0;
 hrtime_t g_backend_last_error = 0;
 hrtime_t g_loop_time = 0;
 
@@ -79,6 +82,14 @@ backend_lookup(uint32_t id)
 	backend_t search;
 	search.be_id = id;
 
+	if (id == 0) {
+		/*
+		 * Backend ID zero is reserved to mean a backend is not
+		 * assigned.
+		 */
+		return (NULL);
+	}
+
 	return (avl_find(&g_backends, &search, NULL));
 }
 
@@ -95,7 +106,7 @@ backend_t *
 backend_select(void)
 {
 	ulong_t nnodes = avl_numnodes(&g_backends);
-	backend_t *be = g_backend_last_assigned;
+	backend_t *be = backend_lookup(g_backend_last_assigned);
 
 	for (unsigned n = 0; n < nnodes; n++) {
 		if (be != NULL) {
@@ -118,7 +129,7 @@ backend_select(void)
 			 * We believe this backend is alive and can be used
 			 * for new remotes.
 			 */
-			g_backend_last_assigned = be;
+			g_backend_last_assigned = be->be_id;
 			return (be);
 		}
 	}
@@ -201,10 +212,32 @@ fail:
 }
 
 static void
+backend_ensure_connected(backend_t *be)
+{
+	if (!be->be_reconnect) {
+		return;
+	}
+
+	VERIFY(!be->be_ok);
+
+	bunyan_debug(be->be_log, "reconnecting to backend", BUNYAN_T_END);
+
+	if (bbal_connect_uds(be) != 0) {
+		bunyan_error(be->be_log, "failed to connect",
+		    BUNYAN_T_INT32, "errno", (int32_t)errno,
+		    BUNYAN_T_STRING, "strerror", strerror(errno),
+		    BUNYAN_T_END);
+		return;
+	}
+
+	be->be_reconnect = B_FALSE;
+}
+
+static void
 backends_refresh(cloop_t *loop)
 {
+	const char *path = g_backends_path;
 	DIR *sockdir;
-	const char *path = "/tmp/bbal_sockets";
 
 	if ((sockdir = opendir(path)) == NULL) {
 		bunyan_error(g_log, "error opening socket directory",
@@ -260,6 +293,8 @@ backends_refresh(cloop_t *loop)
 			    BUNYAN_T_END);
 			exit(1);
 		}
+
+		backend_ensure_connected(be);
 	}
 
 	VERIFY0(closedir(sockdir));
@@ -277,8 +312,6 @@ backends_init(cloop_t *loop)
 	return (0);
 }
 
-avl_tree_t g_remotes;
-
 static int
 remotes_compar(const void *first, const void *second)
 {
@@ -295,6 +328,54 @@ remotes_init(void)
 	    offsetof(remote_t, rem_node));
 
 	return (0);
+}
+
+typedef enum {
+	REMBE_PRIMARY = 1234,
+	REMBE_BACKUP,
+	REMBE_BOTH
+} backend_which_t;
+
+static void
+remote_set_backend(remote_t *rem, backend_which_t w, backend_t *be)
+{
+	VERIFY(w == REMBE_PRIMARY || w == REMBE_BACKUP);
+
+	if (w == REMBE_PRIMARY) {
+		VERIFY3U(rem->rem_backend, ==, 0);
+
+		rem->rem_backend = be->be_id;
+		be->be_remotes++;
+	}
+
+	if (w == REMBE_BACKUP) {
+		VERIFY3U(rem->rem_backend_backup, ==, 0);
+
+		rem->rem_backend_backup = be->be_id;
+	}
+}
+
+static void
+remote_reset_backend(remote_t *rem, backend_which_t w)
+{
+	VERIFY(w == REMBE_PRIMARY || w == REMBE_BACKUP || w == REMBE_BOTH);
+
+	if (w == REMBE_PRIMARY || w == REMBE_BOTH) {
+		if (rem->rem_backend != 0) {
+			/*
+			 * Update the count for this backend.
+			 */
+			backend_t *be = backend_lookup(rem->rem_backend);
+
+			VERIFY3U(be->be_remotes, >, 0);
+			be->be_remotes--;
+		}
+		rem->rem_backend = 0;
+	}
+
+	if (w == REMBE_BACKUP || w == REMBE_BOTH) {
+		rem->rem_backend_backup = 0;
+	}
 }
 
 /*
@@ -315,7 +396,7 @@ top:
 			/*
 			 * No backend could be assigned at this time.
 			 */
-			rem->rem_backend_backup = rem->rem_backend = 0;
+			remote_reset_backend(rem, REMBE_BOTH);
 			return (NULL);
 		}
 
@@ -327,8 +408,8 @@ top:
 		    "remote assigned to new primary backend",
 		    BUNYAN_T_UINT32, "be_id", be->be_id,
 		    BUNYAN_T_END);
-		rem->rem_backend = be->be_id;
-		rem->rem_backend_backup = 0;
+		remote_set_backend(rem, REMBE_PRIMARY, be);
+		remote_reset_backend(rem, REMBE_BACKUP);
 		return (be);
 	}
 
@@ -336,7 +417,7 @@ top:
 		/*
 		 * Our existing backend could not be found!  Reset everything.
 		 */
-		rem->rem_backend_backup = rem->rem_backend = 0;
+		remote_reset_backend(rem, REMBE_BOTH);
 		goto top;
 	}
 
@@ -349,7 +430,7 @@ top:
 			    "remote assigned to original primary backend",
 			    BUNYAN_T_UINT32, "be_id", be->be_id,
 			    BUNYAN_T_END);
-			rem->rem_backend_backup = 0;
+			remote_reset_backend(rem, REMBE_BACKUP);
 		}
 		return (be);
 	}
@@ -371,7 +452,7 @@ backup_again:
 		    "remote assigned to new backup backend",
 		    BUNYAN_T_UINT32, "be_id", be->be_id,
 		    BUNYAN_T_END);
-		rem->rem_backend_backup = be->be_id;
+		remote_set_backend(rem, REMBE_BACKUP, be);
 		return (be);
 	}
 
@@ -381,7 +462,7 @@ backup_again:
 		 * Our existing backup backend could not be found or is
 		 * offline.  Reset just the backup and try again.
 		 */
-		rem->rem_backend_backup = 0;
+		remote_reset_backend(rem, REMBE_BACKUP);
 		goto backup_again;
 	}
 
@@ -446,13 +527,8 @@ remote_destroy(remote_t *rem)
 }
 
 static void
-run_timer(cloop_ent_t *ent, int event)
+run_timer_rebalance(cloop_ent_t *ent, int event)
 {
-	VERIFY3S(event, ==, CLOOP_CB_TIMER);
-
-	backends_refresh(cloop_ent_loop(ent));
-
-#if 0
 	/*
 	 * Keep track of the minimum and the maximum count of remotes per
 	 * backend.  If there is a spread of more than 2 remotes per backend
@@ -461,50 +537,111 @@ run_timer(cloop_ent_t *ent, int event)
 	 * XXX Reword this comment.
 	 */
 	int32_t max_count = -1;
-	int32_t max_backend = 0;
+	uint32_t max_backend_id = 0;
 	int32_t min_count = -1;
-#endif
 
 	for (backend_t *be = avl_first(&g_backends); be != NULL;
 	    be = AVL_NEXT(&g_backends, be)) {
-#if 0
-		if (max_count == -1) {
-			max_backend = be->be_id;
+		if (!be->be_ok) {
+			/*
+			 * If a backend is not online, do not consider it
+			 * in the rebalancing process.
+			 */
+			continue;
+		}
+
+		if (max_count == -1 || be->be_remotes > (uint32_t)max_count) {
+			max_backend_id = be->be_id;
 			max_count = be->be_remotes;
 		}
-		if (min_count == -1) {
+		if (min_count == -1 || be->be_remotes < (uint32_t)min_count) {
 			min_count = be->be_remotes;
 		}
-#endif
+	}
+
+	/*
+	 * Check to see what the spread is.
+	 */
+	uint32_t spread = max_count - min_count;
+	bunyan_trace(g_log, "balancer spread statistics",
+	    BUNYAN_T_INT32, "max_count", max_count,
+	    BUNYAN_T_INT32, "min_count", min_count,
+	    BUNYAN_T_UINT32, "max_be_id", max_backend_id,
+	    BUNYAN_T_UINT32, "spread", spread,
+	    BUNYAN_T_END);
+
+	if (min_count == -1 || max_count == -1) {
+		/*
+		 * There are no working backends.  Skip rebalancing completely.
+		 */
+		return;
+	}
+
+	/*
+	 * Look for remotes which match the backend with the most remotes
+	 * assigned and cause them to select a new primary backend.
+	 */
+	ulong_t nbe = avl_numnodes(&g_backends);
+	for (remote_t *rem = avl_first(&g_remotes); rem != NULL;
+	    rem = AVL_NEXT(&g_remotes, rem)) {
+		if (spread < nbe) {
+			break;
+		}
+
+		if (rem->rem_backend == max_backend_id) {
+			VERIFY3S(spread, >, 0);
+			spread--;
+
+			bunyan_trace(rem->rem_log, "rebalancing to reduce "
+			    "spread", BUNYAN_T_END);
+			remote_reset_backend(rem, REMBE_BOTH);
+		}
+	}
+}
+
+static void
+run_timer_expire_remotes(cloop_ent_t *ent, int event)
+{
+	/*
+	 * Look for stale remote entries.
+	 */
+	remote_t *rem_next;
+	for (remote_t *rem = avl_first(&g_remotes); rem != NULL;
+	    rem = rem_next) {
+		hrtime_t age = g_loop_time - rem->rem_last_seen;
+		rem_next = AVL_NEXT(&g_remotes, rem);
 
 		/*
-		 * Do we need to initiate a connection?
+		 * If we have not heard from a particular host in two minutes,
+		 * expire its remote entry.
 		 */
-		if (be->be_reconnect) {
-			VERIFY(!be->be_ok);
-
-			bunyan_debug(be->be_log, "reconnecting to backend",
+		if (age > SECONDS_IN_NS(120)) {
+			bunyan_debug(rem->rem_log, "expiring remote entry",
 			    BUNYAN_T_END);
-
-			if (bbal_connect_uds(be) != 0) {
-				bunyan_error(be->be_log, "failed to connect",
-				    BUNYAN_T_INT32, "errno", (int32_t)errno,
-				    BUNYAN_T_STRING, "strerror",
-				    strerror(errno),
-				    BUNYAN_T_END);
-				continue;
-			}
-
-			be->be_reconnect = B_FALSE;
+			remote_destroy(rem);
 			continue;
 		}
 	}
+}
+
+static void
+run_timer_general(cloop_ent_t *ent, int event)
+{
+	VERIFY3S(event, ==, CLOOP_CB_TIMER);
+
+	backends_refresh(cloop_ent_loop(ent));
 
 	/*
 	 * Look for backends to which we should send a heartbeat message.
 	 */
 	for (backend_t *be = avl_first(&g_backends); be != NULL;
 	    be = AVL_NEXT(&g_backends, be)) {
+		/*
+		 * If this backend is not currently connected, we need to
+		 * initiate a connection attempt.
+		 */
+		backend_ensure_connected(be);
+
 		if (!be->be_ok) {
 			continue;
 		}
@@ -560,46 +697,68 @@ run_timer(cloop_ent_t *ent, int event)
 		}
 	}
 
-	/*
-	 * Look for stale remote entries.
-	 */
-	hrtime_t now = gethrtime();
-	remote_t *rem_next;
-	for (remote_t *rem = avl_first(&g_remotes); rem != NULL;
-	    rem = rem_next) {
-		hrtime_t age = now - rem->rem_last_seen;
-		rem_next = AVL_NEXT(&g_remotes, rem);
-
-		/*
-		 * XXX make this 120 seconds?
-		 */
-		if (age > SECONDS_IN_NS(5)) {
-			bunyan_debug(rem->rem_log, "expiring remote entry",
-			    BUNYAN_T_END);
-			remote_destroy(rem);
-			continue;
-		}
-	}
 }
 
 int
 main(int argc, char *argv[])
 {
 	cloop_t *loop = NULL;
-	cloop_ent_t *timer = NULL;
 	cloop_ent_t *udp = NULL;
 	cserver_t *tcp = NULL;
 	const char *listen_ip = "0.0.0.0";
-	const char *listen_port = "10053";
+	const char *listen_port = "53";
 	int level = BUNYAN_L_INFO;
 
-	if (getenv("LOG_LEVEL") != NULL) {
-		if (bunyan_parse_level(getenv("LOG_LEVEL"), &level) != 0) {
-			err(1, "invalid LOG_LEVEL \"%s\"", getenv("LOG_LEVEL"));
+	int c;
+	while ((c = getopt(argc, argv, ":b:p:s:l:")) != -1) {
+		switch (c) {
+		case 'b':
+			listen_ip = optarg;
+			break;
+
+		case 'p':
+			listen_port = optarg;
+			break;
+
+		case 's':
+			g_backends_path = optarg;
+			break;
+
+		case 'l':
+			if (bunyan_parse_level(optarg, &level) != 0) {
+				err(1, "invalid log level for -l: %s", optarg);
+			}
+			break;
+
+		case ':':
+			errx(1, "argument -%c requires an option value",
+			    optopt);
+			break;
+
+		case '?':
+			errx(1, "unknown argument -%c", optopt);
+			break;
+
+		default:
+			abort();
 		}
 	}
 
-	if (bunyan_init("bbal", &g_log) != 0) {
+	if (g_backends_path == NULL) {
+		errx(1, "must specify socket directory (-s)");
+	}
+
+	/*
+	 * Allow the environment to override the bunyan log level.
+	 */
+	const char *llenv = getenv("LOG_LEVEL");
+	if (llenv != NULL) {
+		if (bunyan_parse_level(llenv, &level) != 0) {
+			err(1, "invalid LOG_LEVEL \"%s\"", llenv);
+		}
+	}
+
+	if (bunyan_init("bender", &g_log) != 0) {
 		err(1, "bunyan_init");
 	}
 	if (bunyan_stream_add(g_log, "stdout", level, bunyan_stream_fd,
@@ -610,18 +769,49 @@ main(int argc, char *argv[])
 	(void) bunyan_info(g_log, "starting up", BUNYAN_T_END);
 
 	if (cloop_alloc(&loop) != 0 || cloop_ent_alloc(&udp) != 0 ||
-	    cloop_ent_alloc(&timer) != 0 || cserver_alloc(&tcp) != 0) {
-		err(1, "cloop init");
+	    cserver_alloc(&tcp) != 0) {
+		bunyan_fatal(g_log, "cloop init failure",
+		    BUNYAN_T_INT32, "errno", (int32_t)errno,
+		    BUNYAN_T_STRING, "strerror", strerror(errno),
+		    BUNYAN_T_END);
+		exit(1);
 	}
 
 	if (backends_init(loop) != 0 || remotes_init() != 0) {
-		err(1, "data init");
+		bunyan_fatal(g_log, "data structure failure",
+		    BUNYAN_T_INT32, "errno", (int32_t)errno,
+		    BUNYAN_T_STRING, "strerror", strerror(errno),
+		    BUNYAN_T_END);
+		exit(1);
 	}
 
-	if (cloop_attach_ent_timer(loop, timer, 1) != 0) {
-		err(1, "timer init");
+	/*
+	 * Start the periodic maintenance routines.  Intervals are specified
+	 * in seconds.
+	 */
+	struct timer_def {
+		cloop_ent_cb_t *tde_func;
+		int tde_interval;
+		cloop_ent_t *tde_ent;
+	} timer_defs[] = {
+		{ .tde_func = run_timer_general,	.tde_interval = 5 },
+		{ .tde_func = run_timer_rebalance,	.tde_interval = 15 },
+		{ .tde_func = run_timer_expire_remotes,	.tde_interval = 30 },
+		{ NULL }
+	};
+	for (unsigned i = 0; timer_defs[i].tde_func != NULL; i++) {
+		if (cloop_ent_alloc(&timer_defs[i].tde_ent) != 0 ||
+		    cloop_attach_ent_timer(loop, timer_defs[i].tde_ent,
+		    timer_defs[i].tde_interval) != 0) {
+			bunyan_fatal(g_log, "timer init failure",
+			    BUNYAN_T_INT32, "errno", (int32_t)errno,
+			    BUNYAN_T_STRING, "strerror", strerror(errno),
+			    BUNYAN_T_END);
+			exit(1);
+		}
+		cloop_ent_on(timer_defs[i].tde_ent, CLOOP_CB_TIMER,
+		    timer_defs[i].tde_func);
 	}
-	cloop_ent_on(timer, CLOOP_CB_TIMER, run_timer);
 
 	/*
 	 * Listen on the UDP DNS port.
@@ -655,6 +845,11 @@ main(int argc, char *argv[])
 	    BUNYAN_T_END);
 
 	/*
+	 * Before we kick off the event loop, do an initial sweep for backends.
+	 */
+	backends_refresh(loop);
+
+	/*
 	 * Run the event loop.
 	 */
 	int loopc = 0;
@@ -672,7 +867,11 @@ main(int argc, char *argv[])
 		    BUNYAN_T_END);
 
 		if (cloop_run(loop, &again) != 0) {
-			err(1, "cloop_run");
+			bunyan_fatal(g_log, "cloop run failure",
+			    BUNYAN_T_INT32, "errno", (int32_t)errno,
+			    BUNYAN_T_STRING, "strerror", strerror(errno),
+			    BUNYAN_T_END);
+			exit(1);
 		}
 
 		/*

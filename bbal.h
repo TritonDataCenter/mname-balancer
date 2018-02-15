@@ -27,6 +27,7 @@ typedef struct {
 	boolean_t be_reconnect;
 	hrtime_t be_heartbeat_sent;
 	hrtime_t be_heartbeat_seen;
+	uint32_t be_remotes;
 
 	cbufq_t *be_input;
 
