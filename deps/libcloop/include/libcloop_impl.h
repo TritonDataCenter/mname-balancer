@@ -31,23 +31,4 @@ struct cloop_ent {
 	list_node_t clent_link;
 };
 
-#if 0
-#define	CLOOP_ENT_FIELDS						\
-	cloop_ent_type_t clent_type;					\
-	int clent_fd;							\
-	int clent_events;						\
-	list_node_t clent_link
-
-struct cloop_ent {
-	CLOOP_ENT_FIELDS;
-};
-
-typedef struct cloop_ent_tcp {
-	CLOOP_ENT_FIELDS;
-
-	cbufq_t *clent_sendq;
-	cbufq_t *clent_recvq;
-} cloop_ent_tcp_t;
-#endif
-
 #endif	/* !_LIBCLOOP_IMPL_H */
