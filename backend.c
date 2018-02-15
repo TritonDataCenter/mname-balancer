@@ -46,16 +46,16 @@ bbal_uds_data(cconn_t *ccn, int event)
 			cbuf_free(cbufq_deq(q));
 		}
 
-		if (cbufq_available(q) < sizeof (uint32_t)) {
-			/*
-			 * We need at least four bytes in order to read the
-			 * frame type.
-			 */
-			cconn_more_data(ccn);
-			return;
-		}
-
 		if (cbufq_pullup(q, sizeof (uint32_t)) != 0) {
+			if (errno == EIO) {
+				/*
+				 * We need at least four bytes in order to read
+				 * the frame type.
+				 */
+				cconn_more_data(ccn);
+				return;
+			}
+
 			err(1, "cbufq_pullup");
 			return;
 		}
@@ -75,15 +75,29 @@ bbal_uds_data(cconn_t *ccn, int event)
 		    BUNYAN_T_UINT32, "frame_type", frame_type,
 		    BUNYAN_T_END);
 
-		if (frame_type == 1001) {
+		if (frame_type == FRAME_TYPE_SERVER_HELLO) {
 			/*
 			 * SERVER_HELLO.  Just the frame type; nothing else.
 			 */
 			be->be_ok = B_TRUE;
+			be->be_heartbeat_seen = 0;
+			be->be_heartbeat_sent = 0;
 			continue;
 		}
 
-		if (frame_type != 1002) {
+		if (frame_type == FRAME_TYPE_SERVER_HEARTBEAT) {
+			/*
+			 * The server is responding to our periodic heartbeat
+			 * request.
+			 */
+			bunyan_trace(be->be_log, "received heartbeat reply",
+			    BUNYAN_T_END);
+			be->be_heartbeat_seen = gethrtime();
+			be->be_heartbeat_sent = 0;
+			continue;
+		}
+
+		if (frame_type != FRAME_TYPE_OUTBOUND_UDP) {
 			bunyan_error(be->be_log, "invalid frame type",
 			    BUNYAN_T_UINT32, "frame_type", frame_type,
 			    BUNYAN_T_END);
@@ -91,16 +105,17 @@ bbal_uds_data(cconn_t *ccn, int event)
 			return;
 		}
 
-		if (cbufq_available(q) < 3 * sizeof (uint32_t)) {
-			/*
-			 * This frame has three uint32_t values after the
-			 * frame type, but they have not yet arrived.
-			 */
-			VERIFY0(cbuf_position_set(cbuf, marker));
-			break;
-		}
-
 		if (cbufq_pullup(q, 3 * sizeof (uint32_t)) != 0) {
+			if (errno == EIO) {
+				/*
+				 * This frame has three uint32_t values after
+				 * the frame type, but they have not yet
+				 * arrived.
+				 */
+				VERIFY0(cbuf_position_set(cbuf, marker));
+				break;
+			}
+
 			err(1, "cbufq_pullup");
 			return;
 		}
@@ -115,11 +130,16 @@ bbal_uds_data(cconn_t *ccn, int event)
 		VERIFY0(cbuf_get_u32(cbuf, &datalen));
 
 		if (cbufq_pullup(q, datalen) != 0) {
-			/*
-			 * The data has not yet arrived.
-			 */
-			VERIFY0(cbuf_position_set(cbuf, marker));
-			break;
+			if (errno == EIO) {
+				/*
+				 * The data has not yet arrived.
+				 */
+				VERIFY0(cbuf_position_set(cbuf, marker));
+				break;
+			}
+
+			err(1, "cbufq_pullup");
+			return;
 		}
 
 		struct sockaddr_in sin;

@@ -42,12 +42,16 @@ bbal_parse_ipv4addr(const char *ipaddr, const char *port,
 		return (0);
 
 	case 0:
-		warnx("inet_pton (%s) invalid address", ipaddr);
+		bunyan_warn(g_log, "invalid IP address",
+		    BUNYAN_T_STRING, "address", ipaddr,
+		    BUNYAN_T_END);
 		errno = EPROTO;
 		return (-1);
 
 	default:
-		warn("inet_pton (%s) failure", ipaddr);
+		bunyan_warn(g_log, "failed to parse IP address",
+		    BUNYAN_T_STRING, "address", ipaddr,
+		    BUNYAN_T_END);
 		return (-1);
 	}
 }
@@ -58,6 +62,18 @@ bbal_udp_listen(const char *ipaddr, const char *port, int *sockp)
 	int e;
 	int sock = -1;
 	struct sockaddr_in addr;
+	const char *msg;
+
+	bunyan_debug(g_log, "opening UDP listen socket",
+	    BUNYAN_T_STRING, "address", ipaddr,
+	    BUNYAN_T_STRING, "port", port,
+	    BUNYAN_T_END);
+
+	if (bbal_parse_ipv4addr(ipaddr != NULL ? ipaddr : "0.0.0.0", port,
+	    &addr) != 0) {
+		e = errno;
+		goto fail;
+	}
 
 	/*
 	 * Create UDP listen socket.
@@ -65,7 +81,7 @@ bbal_udp_listen(const char *ipaddr, const char *port, int *sockp)
 	if ((sock = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC,
 	    0)) < 0) {
 		e = errno;
-		warn("socket failed");
+		msg = "failed to create UDP listen socket";
 		goto fail;
 	}
 
@@ -76,14 +92,7 @@ bbal_udp_listen(const char *ipaddr, const char *port, int *sockp)
 	if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt_on,
 	    sizeof (opt_on)) != 0) {
 		e = errno;
-		warn("could not set SO_REUSEADDR");
-		goto fail;
-	}
-
-	if (bbal_parse_ipv4addr(ipaddr != NULL ? ipaddr : "0.0.0.0", port,
-	    &addr) != 0) {
-		e = errno;
-		warn("bbal_parse_ipv4addr failed");
+		msg = "failed to set SO_REUSEADDR on UDP listen socket";
 		goto fail;
 	}
 
@@ -92,7 +101,7 @@ bbal_udp_listen(const char *ipaddr, const char *port, int *sockp)
 	 */
 	if (bind(sock, (struct sockaddr *)&addr, sizeof (addr)) != 0) {
 		e = errno;
-		warn("bind failed");
+		msg = "failed to bind UDP listen socket";
 		goto fail;
 	}
 
@@ -105,6 +114,12 @@ bbal_udp_listen(const char *ipaddr, const char *port, int *sockp)
 	return (0);
 
 fail:
+	bunyan_fatal(g_log, msg,
+	    BUNYAN_T_STRING, "address", ipaddr,
+	    BUNYAN_T_STRING, "port", port,
+	    BUNYAN_T_INT32, "errno", (int32_t)e,
+	    BUNYAN_T_STRING, "strerror", strerror(e),
+	    BUNYAN_T_END);
 	if (sock != -1) {
 		VERIFY0(close(sock));
 	}
@@ -115,11 +130,12 @@ fail:
 void
 bbal_udp_read(cloop_ent_t *ent, int event)
 {
-	cbuf_t *buf;
+	cbuf_t *buf = NULL;
+	uint32_t packet_count = 0;
 
-	if (cbuf_alloc(&buf, 8192) != 0) {
-		warn("cbuf_alloc");
-		return;
+another_packet:
+	if (cbuf_alloc(&buf, 2048) != 0) {
+		goto bail;
 	}
 	cbuf_byteorder_set(buf, CBUF_ORDER_LITTLE_ENDIAN);
 
@@ -133,7 +149,7 @@ bbal_udp_read(cloop_ent_t *ent, int event)
 	VERIFY0(cbuf_position_set(buf, hdrsz));
 
 	/*
-	 * XXX Read a packet from the file descriptor.
+	 * Read a UDP packet.
 	 */
 	struct sockaddr_storage from;
 	socklen_t fromlen = sizeof (from);
@@ -147,32 +163,49 @@ again:
 			goto again;
 
 		case EAGAIN:
+			bunyan_trace(g_log, "ran out of UDP packets",
+			    BUNYAN_T_UINT32, "packet_count", packet_count,
+			    BUNYAN_T_END);
 			goto bail;
 
 		default:
-			warn("recvfrom failure");
-			goto bail;
+			VERIFY3S(errno, ==, 0);
 		}
 	}
 
-	struct sockaddr_in *sin = (struct sockaddr_in *)&from;
-	char remote[INET6_ADDRSTRLEN];
-	const char *a = inet_ntop(sin->sin_family,
-	    &sin->sin_addr, remote, sizeof (remote));
-
-	fprintf(stdout, "[%s:%d] recvfrom %d bytes\n", a,
-	    (int)ntohs(sin->sin_port), rsz);
-
+	const struct sockaddr_in *sin = (struct sockaddr_in *)&from;
 	remote_t *rem = remote_lookup(&sin->sin_addr);
 	if (rem == NULL) {
-		fprintf(stdout, "\tno remote; drop\n");
+		bunyan_error(g_log, "could not lookup remote (dropping)",
+		    BUNYAN_T_IP, "remote_ip", &sin->sin_addr,
+		    BUNYAN_T_END);
 		goto bail;
 	}
 
+	if (rsz > 1500) {
+		/*
+		 * We do not expect to receive UDP messages reassembled from
+		 * multiple fragments.  RFC compliant clients have no reason
+		 * to send us particularly large packets.  If we see something
+		 * unexpectedly long, log a warning.
+		 */
+		bunyan_warn(rem->rem_log, "dropping oversized UDP packet",
+		    BUNYAN_T_UINT32, "len", (uint32_t)rsz,
+		    BUNYAN_T_END);
+		goto bail;
+	}
+
+	bunyan_trace(rem->rem_log, "received UDP packet from remote",
+	    BUNYAN_T_UINT32, "remote_port", (uint32_t)ntohs(sin->sin_port),
+	    BUNYAN_T_UINT32, "len", (uint32_t)rsz,
+	    BUNYAN_T_END);
+
 	backend_t *be = remote_backend(rem);
 	if (be == NULL) {
+		bunyan_trace(rem->rem_log, "could not find backend for remote",
+		    BUNYAN_T_END);
+
 		rem->rem_stat_udp_drop++;
-		fprintf(stdout, "\tno backend; drop\n");
 		goto bail;
 	}
 
@@ -186,6 +219,21 @@ again:
 	size_t p = cbuf_position(buf);
 	cbuf_rewind(buf);
 
+	/*
+	 * An inbound UDP packet is wrapped in a frame of type 2.  The header
+	 * consists of four little endian numbers, followed by the data from
+	 * the packet.
+	 *
+	 * 	OFFSET	LENGTH	DESCRIPTION
+	 * 	--------------------------------------------------------------
+	 * 	0	4	frame type (INBOUND_UDP = 2)
+	 * 	4	4	IPv4 address of remote peer
+	 * 	8	4	UDP source port for this packet
+	 * 	12	4	length of data in frame (not including header)
+	 * 	--------------------------------------------------------------
+	 * 	16	N	frame data
+	 * 	--------------------------------------------------------------
+	 */
 	VERIFY0(cbuf_put_u32(buf, 2)); /* FRAME TYPE */
 	VERIFY0(cbuf_put_u32(buf, ntohl(sin->sin_addr.s_addr))); /* IP */
 	VERIFY0(cbuf_put_u32(buf, ntohs(sin->sin_port))); /* PORT */
@@ -193,14 +241,46 @@ again:
 
 	VERIFY0(cbuf_position_set(buf, p));
 
-	fprintf(stdout, "\tbackend ok; sending\n");
-	if (cconn_send(be->be_conn, buf) != 0) {
-		rem->rem_stat_udp_drop++;
-		warn("send backend %d", be->be_id);
+	bunyan_trace(be->be_log, "forwarding UDP packet to backend",
+	    BUNYAN_T_IP, "remote_ip", &sin->sin_addr,
+	    BUNYAN_T_UINT32, "remote_port", (uint32_t)ntohs(sin->sin_port),
+	    BUNYAN_T_UINT32, "len", (uint32_t)rsz,
+	    BUNYAN_T_END);
 
+	if (cconn_send(be->be_conn, buf) != 0) {
+		bunyan_warn(be->be_log, "failed to send packet to backend",
+		    BUNYAN_T_IP, "remote_ip", &sin->sin_addr,
+		    BUNYAN_T_UINT32, "remote_port", (uint32_t)ntohs(
+		    sin->sin_port),
+		    BUNYAN_T_UINT32, "len", (uint32_t)rsz,
+		    BUNYAN_T_INT32, "errno", (int32_t)errno,
+		    BUNYAN_T_STRING, "strerror", strerror(errno),
+		    BUNYAN_T_END);
+
+		rem->rem_stat_udp_drop++;
+
+		/*
+		 * Abort this connection to the backend.  This will result
+		 * in at least a CLOSE callback, where we can trigger a
+		 * reconnection.
+		 */
 		cconn_abort(be->be_conn);
 	}
+	buf = NULL;
 
+	if (packet_count < 16) {
+		/*
+		 * In case more than one UDP packet has arrived, try to
+		 * read again.  If there's nothing left, we'll get EAGAIN and
+		 * bail out.
+		 */
+		packet_count++;
+		goto another_packet;
+	}
+
+	/*
+	 * Ask for more UDP packets.
+	 */
 	cloop_ent_want(ent, CLOOP_CB_READ);
 	return;
 

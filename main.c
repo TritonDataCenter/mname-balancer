@@ -17,6 +17,7 @@
 #include <arpa/inet.h>
 #include <sys/un.h>
 #include <sys/time.h>
+#include <dirent.h>
 
 #include <sys/debug.h>
 #include <sys/list.h>
@@ -34,6 +35,7 @@ bunyan_logger_t *g_log;
 int g_sock = -1;
 
 static avl_tree_t g_backends;
+static avl_tree_t g_backends_by_path;
 static backend_t *g_backend_last_assigned = NULL;
 hrtime_t g_backend_last_error = 0;
 hrtime_t g_loop_time = 0;
@@ -45,6 +47,14 @@ compare_u32(uint32_t first, uint32_t second)
 }
 
 static int
+compare_str(const char *first, const char *second)
+{
+	int ret = strcmp(first, second);
+
+	return (ret > 0 ? 1 : ret < 0 ? -1 : 0);
+}
+
+static int
 backends_compar(const void *first, const void *second)
 {
 	const backend_t *bf = first;
@@ -53,6 +63,16 @@ backends_compar(const void *first, const void *second)
 	return (compare_u32(bf->be_id, bs->be_id));
 }
 
+static int
+backends_compar_by_path(const void *first, const void *second)
+{
+	const backend_t *bf = first;
+	const backend_t *bs = second;
+
+	return (compare_str(bf->be_path, bs->be_path));
+}
+
+
 backend_t *
 backend_lookup(uint32_t id)
 {
@@ -60,6 +80,15 @@ backend_lookup(uint32_t id)
 	search.be_id = id;
 
 	return (avl_find(&g_backends, &search, NULL));
+}
+
+backend_t *
+backend_lookup_by_path(const char *path)
+{
+	backend_t search;
+	search.be_path = (char *)path;
+
+	return (avl_find(&g_backends_by_path, &search, NULL));
 }
 
 backend_t *
@@ -99,7 +128,7 @@ backend_select(void)
 	 */
 	hrtime_t now = gethrtime();
 	if (g_backend_last_error == 0 || (now - g_backend_last_error) >
-	    5000000000LL) {
+	    SECONDS_IN_NS(5)) {
 		bunyan_error(g_log, "no backends available", BUNYAN_T_END);
 		g_backend_last_error = now;
 	}
@@ -110,6 +139,8 @@ static int
 backend_create(cloop_t *loop, const char *path, backend_t **bep)
 {
 	int e;
+
+	VERIFY3P(loop, !=, NULL);
 
 	backend_t *be;
 	if ((be = calloc(1, sizeof (*be))) == NULL) {
@@ -151,6 +182,7 @@ backend_create(cloop_t *loop, const char *path, backend_t **bep)
 	bunyan_info(be->be_log, "new backend", BUNYAN_T_END);
 
 	avl_add(&g_backends, be);
+	avl_add(&g_backends_by_path, be);
 
 	if (bep != NULL) {
 		*bep = be;
@@ -168,21 +200,79 @@ fail:
 	return (-1);
 }
 
+static void
+backends_refresh(cloop_t *loop)
+{
+	DIR *sockdir;
+	const char *path = "/tmp/bbal_sockets";
+
+	if ((sockdir = opendir(path)) == NULL) {
+		bunyan_error(g_log, "error opening socket directory",
+		    BUNYAN_T_STRING, "socket_dir", path,
+		    BUNYAN_T_INT32, "errno", (int32_t)errno,
+		    BUNYAN_T_STRING, "error", strerror(errno),
+		    BUNYAN_T_END);
+		return;
+	}
+
+	for (;;) {
+		struct dirent *de;
+
+		errno = 0;
+		if ((de = readdir(sockdir)) == NULL) {
+			if (errno != 0) {
+				bunyan_error(g_log, "error reading socket "
+				    "directory",
+				    BUNYAN_T_STRING, "socket_dir", path,
+				    BUNYAN_T_INT32, "errno", (int32_t)errno,
+				    BUNYAN_T_STRING, "error", strerror(errno),
+				    BUNYAN_T_END);
+			}
+			break;
+		}
+
+		if (strcmp(de->d_name, ".") == 0 ||
+		    strcmp(de->d_name, "..") == 0) {
+			continue;
+		}
+
+		/*
+		 * The backend path name needs to fit in the 108 characters
+		 * available in the "sun_path" member of "struct sockaddr_un".
+		 */
+		char sockpath[108];
+		VERIFY3S(snprintf(sockpath, sizeof (sockpath), "%s/%s",
+		    path, de->d_name), <, sizeof (sockpath));
+
+		backend_t *be;
+		if ((be = backend_lookup_by_path(sockpath)) != NULL) {
+			/*
+			 * There is already a backend for this path.
+			 */
+			continue;
+		}
+
+		if (backend_create(loop, sockpath, &be) != 0) {
+			bunyan_fatal(g_log, "backend_create failed",
+			    BUNYAN_T_STRING, "socket_path", sockpath,
+			    BUNYAN_T_INT32, "errno", (int32_t)errno,
+			    BUNYAN_T_STRING, "error", strerror(errno),
+			    BUNYAN_T_END);
+			exit(1);
+		}
+	}
+
+	VERIFY0(closedir(sockdir));
+}
+
 static int
 backends_init(cloop_t *loop)
 {
 	avl_create(&g_backends, backends_compar, sizeof (backend_t),
 	    offsetof(backend_t, be_node));
 
-	if (backend_create(loop, "/tmp/bbal.0", NULL) != 0) {
-		err(1, "backend_create 1");
-	}
-	if (backend_create(loop, "/tmp/bbal.1", NULL) != 0) {
-		err(1, "backend_create 2");
-	}
-	if (backend_create(loop, "/tmp/bbal.2", NULL) != 0) {
-		err(1, "backend_create 3");
-	}
+	avl_create(&g_backends_by_path, backends_compar_by_path,
+	    sizeof (backend_t), offsetof(backend_t, be_node_by_path));
 
 	return (0);
 }
@@ -233,6 +323,10 @@ top:
 		 * A newly selected backend must be working at the time of
 		 * assignment.
 		 */
+		bunyan_info(rem->rem_log,
+		    "remote assigned to new primary backend",
+		    BUNYAN_T_UINT32, "be_id", be->be_id,
+		    BUNYAN_T_END);
 		rem->rem_backend = be->be_id;
 		rem->rem_backend_backup = 0;
 		return (be);
@@ -250,6 +344,13 @@ top:
 		/*
 		 * Our primary backend is online.
 		 */
+		if (rem->rem_backend_backup != 0) {
+			bunyan_info(rem->rem_log,
+			    "remote assigned to original primary backend",
+			    BUNYAN_T_UINT32, "be_id", be->be_id,
+			    BUNYAN_T_END);
+			rem->rem_backend_backup = 0;
+		}
 		return (be);
 	}
 
@@ -266,6 +367,10 @@ backup_again:
 			return (NULL);
 		}
 
+		bunyan_info(rem->rem_log,
+		    "remote assigned to new backup backend",
+		    BUNYAN_T_UINT32, "be_id", be->be_id,
+		    BUNYAN_T_END);
 		rem->rem_backend_backup = be->be_id;
 		return (be);
 	}
@@ -310,6 +415,15 @@ remote_lookup(const struct in_addr *addr)
 	rem->rem_first_seen = g_loop_time;
 	rem->rem_last_seen = g_loop_time;
 
+	if (bunyan_child(g_log, &rem->rem_log,
+	    BUNYAN_T_IP, "remote_ip", &rem->rem_addr,
+	    BUNYAN_T_END) != 0) {
+		free(rem);
+		return (NULL);
+	}
+
+	bunyan_info(rem->rem_log, "new remote peer", BUNYAN_T_END);
+
 	avl_insert(&g_remotes, rem, where);
 
 	return (rem);
@@ -322,6 +436,10 @@ remote_destroy(remote_t *rem)
 		return;
 	}
 
+	if (rem->rem_log != NULL) {
+		bunyan_fini(rem->rem_log);
+	}
+
 	avl_remove(&g_remotes, rem);
 
 	free(rem);
@@ -331,6 +449,8 @@ static void
 run_timer(cloop_ent_t *ent, int event)
 {
 	VERIFY3S(event, ==, CLOOP_CB_TIMER);
+
+	backends_refresh(cloop_ent_loop(ent));
 
 #if 0
 	/*
@@ -381,6 +501,66 @@ run_timer(cloop_ent_t *ent, int event)
 	}
 
 	/*
+	 * Look for backends to which we should send a heartbeat message.
+	 */
+	for (backend_t *be = avl_first(&g_backends); be != NULL;
+	    be = AVL_NEXT(&g_backends, be)) {
+		if (!be->be_ok) {
+			continue;
+		}
+
+		if (be->be_heartbeat_sent == 0) {
+			/*
+			 * We do not have an outstanding heartbeat.
+			 */
+			if (be->be_heartbeat_seen == 0 ||
+			    (g_loop_time - be->be_heartbeat_seen) >
+			    SECONDS_IN_NS(30)) {
+				/*
+				 * Either we have never sent a heartbeat, or it
+				 * has been at least 30 seconds since we have
+				 * seen a reply from the server.  Send one now.
+				 */
+				cbuf_t *buf;
+				if (cbuf_alloc(&buf, 4) != 0) {
+					continue;
+				}
+				cbuf_byteorder_set(buf,
+				    CBUF_ORDER_LITTLE_ENDIAN);
+				VERIFY0(cbuf_put_u32(buf,
+				    FRAME_TYPE_CLIENT_HEARTBEAT));
+				if (cconn_send(be->be_conn, buf) != 0) {
+					cbuf_free(buf);
+					continue;
+				}
+
+				bunyan_trace(be->be_log, "heartbeat sent",
+				    BUNYAN_T_END);
+
+				be->be_heartbeat_sent = g_loop_time;
+				be->be_heartbeat_seen = 0;
+				continue;
+			}
+			continue;
+		}
+
+		if (be->be_heartbeat_sent != 0 &&
+		    be->be_heartbeat_seen == 0 &&
+		    (g_loop_time - be->be_heartbeat_sent) > SECONDS_IN_NS(30)) {
+			/*
+			 * We have an outstanding heartbeat for which we have
+			 * not received a reply in 30 seconds.  Terminate this
+			 * connection.
+			 */
+			bunyan_error(be->be_log, "no heartbeat from backend "
+			    "(aborting connection)", BUNYAN_T_END);
+			be->be_ok = B_FALSE;
+			cconn_abort(be->be_conn);
+			continue;
+		}
+	}
+
+	/*
 	 * Look for stale remote entries.
 	 */
 	hrtime_t now = gethrtime();
@@ -393,8 +573,8 @@ run_timer(cloop_ent_t *ent, int event)
 		/*
 		 * XXX make this 120 seconds?
 		 */
-		if (age > 5000000000LL) {
-			bunyan_debug(g_log, "expiring remote entry",
+		if (age > SECONDS_IN_NS(5)) {
+			bunyan_debug(rem->rem_log, "expiring remote entry",
 			    BUNYAN_T_END);
 			remote_destroy(rem);
 			continue;
@@ -411,12 +591,19 @@ main(int argc, char *argv[])
 	cserver_t *tcp = NULL;
 	const char *listen_ip = "0.0.0.0";
 	const char *listen_port = "10053";
+	int level = BUNYAN_L_INFO;
+
+	if (getenv("LOG_LEVEL") != NULL) {
+		if (bunyan_parse_level(getenv("LOG_LEVEL"), &level) != 0) {
+			err(1, "invalid LOG_LEVEL \"%s\"", getenv("LOG_LEVEL"));
+		}
+	}
 
 	if (bunyan_init("bbal", &g_log) != 0) {
 		err(1, "bunyan_init");
 	}
-	if (bunyan_stream_add(g_log, "stdout", BUNYAN_L_TRACE,
-	    bunyan_stream_fd, (void *)STDOUT_FILENO) != 0) {
+	if (bunyan_stream_add(g_log, "stdout", level, bunyan_stream_fd,
+	    (void *)STDOUT_FILENO) != 0) {
 		err(1, "bunyan_stream_add");
 	}
 
@@ -440,7 +627,7 @@ main(int argc, char *argv[])
 	 * Listen on the UDP DNS port.
 	 */
 	if (bbal_udp_listen(listen_ip, listen_port, &g_sock) != 0) {
-		err(1, "bbal_udp_listen");
+		exit(1);
 	}
 
 	cloop_attach_ent(loop, udp, g_sock);
@@ -453,7 +640,13 @@ main(int argc, char *argv[])
 	 */
 	cserver_on(tcp, CSERVER_CB_INCOMING, bbal_tcp_incoming);
 	if (cserver_listen_tcp(tcp, loop, listen_ip, listen_port) != 0) {
-		err(1, "cserver_listen");
+		bunyan_fatal(g_log, "failed to create TCP listen socket",
+		    BUNYAN_T_STRING, "address", listen_ip,
+		    BUNYAN_T_STRING, "port", listen_port,
+		    BUNYAN_T_INT32, "errno", (int32_t)errno,
+		    BUNYAN_T_STRING, "strerror", strerror(errno),
+		    BUNYAN_T_END);
+		exit(1);
 	}
 
 	bunyan_info(g_log, "listening for TCP packets",
@@ -461,6 +654,9 @@ main(int argc, char *argv[])
 	    BUNYAN_T_STRING, "port", listen_port,
 	    BUNYAN_T_END);
 
+	/*
+	 * Run the event loop.
+	 */
 	int loopc = 0;
 	for (;;) {
 		unsigned int again = 0;
@@ -480,7 +676,7 @@ main(int argc, char *argv[])
 		}
 
 		/*
-		 * The event loop should always have work to do, as we have
+		 * The event loop should always have work to do as we have
 		 * registered a persistent timer and have a persistent open
 		 * listen socket.
 		 */

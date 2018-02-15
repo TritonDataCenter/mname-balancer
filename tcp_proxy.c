@@ -74,14 +74,23 @@ bbal_tcp_front_data(cconn_t *ccn, int event)
 	cbufq_t *q = cconn_recvq(prx->prx_front);
 	cbuf_t *b;
 	while ((b = cbufq_deq(q)) != NULL) {
+		if (cbuf_available(b) == 0) {
+			cbuf_free(b);
+			continue;
+		}
+
 		bunyan_trace(prx->prx_log, "forwarded bytes from front to back",
 		    BUNYAN_T_UINT32, "count", cbuf_available(b),
 		    BUNYAN_T_END);
 
 		cbuf_resume(b);
 		if (cconn_send(prx->prx_back, b) != 0) {
+			bunyan_warn(prx->prx_log, "forward to backend failed",
+			    BUNYAN_T_UINT32, "count", cbuf_available(b),
+			    BUNYAN_T_INT32, "errno", (int32_t)errno,
+			    BUNYAN_T_STRING, "strerror", strerror(errno),
+			    BUNYAN_T_END);
 			cbuf_free(b);
-			warn("cconn_send to backend");
 			bbal_tcp_teardown(prx);
 			return;
 		}
@@ -113,44 +122,89 @@ bbal_tcp_back_connect(cconn_t *ccn, int event)
 	cbuf_byteorder_set(buf, CBUF_ORDER_LITTLE_ENDIAN);
 
 	const struct sockaddr_in *sin = cconn_sockaddr_in(prx->prx_front);
-	VERIFY0(cbuf_put_u32(buf, 3)); /* FRAME TYPE */
+	VERIFY0(cbuf_put_u32(buf, FRAME_TYPE_INBOUND_TCP)); /* FRAME TYPE */
 	VERIFY0(cbuf_put_u32(buf, ntohl(sin->sin_addr.s_addr))); /* IP */
 	VERIFY0(cbuf_put_u32(buf, ntohs(sin->sin_port))); /* PORT */
 
 	if (cconn_send(ccn, buf) != 0) {
 		err(1, "cconn_send backend hello frame");
 	}
-
-	prx->prx_flowing = B_TRUE;
-	bbal_tcp_front_data(prx->prx_front, CCONN_CB_DATA_AVAILABLE);
 }
 
 static void
 bbal_tcp_back_data(cconn_t *ccn, int event)
 {
 	proxy_t *prx = cconn_data(ccn);
+	cbufq_t *q = cconn_recvq(ccn);
+	cbuf_t *b;
 
 	bunyan_trace(prx->prx_log, "TCP frontend data", BUNYAN_T_END);
+
+	if (!prx->prx_flowing) {
+		/*
+		 * Wait for the server to send it's acknowledgement of this
+		 * TCP connection before sending data.
+		 */
+		if (cbufq_pullup(q, sizeof (uint32_t)) != 0) {
+			if (errno == EIO) {
+				/*
+				 * Wait for the entire frame type value.
+				 */
+				goto done;
+			}
+
+			err(1, "cbufq_pullup");
+			return;
+		}
+
+		b = cbufq_peek(q);
+		uint32_t frame_type;
+		VERIFY0(cbuf_get_u32(b, &frame_type));
+
+		if (frame_type != FRAME_TYPE_INBOUND_TCP_OK) {
+			bunyan_warn(prx->prx_log, "backend invalid TCP OK",
+			    BUNYAN_T_UINT32, "frame_type", frame_type,
+			    BUNYAN_T_END);
+			bbal_tcp_teardown(prx);
+			return;
+		}
+
+		bunyan_trace(prx->prx_log, "backend reports TCP OK");
+
+		/*
+		 * Start the flow of data from the frontend.
+		 */
+		prx->prx_flowing = B_TRUE;
+		bbal_tcp_front_data(prx->prx_front, CCONN_CB_DATA_AVAILABLE);
+	}
 
 	/*
 	 * Push all of the data we have into the frontend.
 	 */
-	cbufq_t *q = cconn_recvq(prx->prx_back);
-	cbuf_t *b;
 	while ((b = cbufq_deq(q)) != NULL) {
+		if (cbuf_available(b) == 0) {
+			cbuf_free(b);
+			continue;
+		}
+
 		bunyan_trace(prx->prx_log, "forwarded bytes from back to front",
 		    BUNYAN_T_UINT32, "count", cbuf_available(b),
 		    BUNYAN_T_END);
 
 		cbuf_resume(b);
 		if (cconn_send(prx->prx_front, b) != 0) {
+			bunyan_warn(prx->prx_log, "forward to frontend failed",
+			    BUNYAN_T_UINT32, "count", cbuf_available(b),
+			    BUNYAN_T_INT32, "errno", (int32_t)errno,
+			    BUNYAN_T_STRING, "strerror", strerror(errno),
+			    BUNYAN_T_END);
 			cbuf_free(b);
-			warn("cconn_send to frontend");
 			bbal_tcp_teardown(prx);
 			return;
 		}
 	}
 
+done:
 	cconn_more_data(prx->prx_back);
 }
 
@@ -167,7 +221,6 @@ bbal_tcp_end(cconn_t *ccn, int event)
 
 	if (other != NULL && cconn_fin(other) != 0) {
 		bunyan_error(prx->prx_log, "FIN send failed", BUNYAN_T_END);
-		warn("cconn_fin");
 	}
 }
 
@@ -225,17 +278,21 @@ bbal_tcp_incoming(cserver_t *cserver, int event)
 	proxy_t *prx;
 	if ((prx = calloc(1, sizeof (*prx))) == NULL) {
 		/*
-		 * XXX Exit now.  We could instead wait for more memory, but
-		 * we'd need to remember to call "cserver_accept()" later or
-		 * this incoming callback won't rearm.
+		 * Abort here.  We could instead wait for more memory, but we'd
+		 * need to remember to call "cserver_accept()" later or this
+		 * incoming callback won't rearm.
 		 */
-		err(1, "incoming tcp calloc");
+		bunyan_fatal(g_log, "incoming TCP calloc", BUNYAN_T_END);
+		abort();
 	}
 	prx->prx_id = ++g_tcp_conn_count;
 
 	if (cserver_accept(cserver, &prx->prx_front) != 0) {
 		if (errno != EAGAIN) {
-			warn("cserver_accept");
+			bunyan_warn(g_log, "incoming TCP accept failure",
+			    BUNYAN_T_INT32, "errno", (int32_t)errno,
+			    BUNYAN_T_STRING, "strerror", strerror(errno),
+			    BUNYAN_T_END);
 		}
 		free(prx);
 		return;
@@ -243,24 +300,30 @@ bbal_tcp_incoming(cserver_t *cserver, int event)
 
 	g_active++;
 
+	const struct sockaddr_in *sin = cconn_sockaddr_in(prx->prx_front);
 	bunyan_debug(g_log, "inbound TCP connection",
 	    BUNYAN_T_UINT32, "conn_id", prx->prx_id,
-	    BUNYAN_T_STRING, "address", cconn_remote_addr_str(prx->prx_front),
+	    BUNYAN_T_IP, "remote_ip", &sin->sin_addr,
+	    BUNYAN_T_UINT32, "remote_port", (uint32_t)ntohs(sin->sin_port),
 	    BUNYAN_T_END);
 
 	/*
 	 * Select a backend for the remote peer.
 	 */
-	remote_t *rem = remote_lookup(
-	    &cconn_sockaddr_in(prx->prx_front)->sin_addr);
+	remote_t *rem = remote_lookup(&sin->sin_addr);
 	if (rem == NULL) {
-		warn("remote_lookup");
+		bunyan_error(g_log, "could not lookup remote (dropping)",
+		    BUNYAN_T_IP, "remote_ip", &sin->sin_addr,
+		    BUNYAN_T_UINT32, "remote_port",
+		    (uint32_t)ntohs(sin->sin_port),
+		    BUNYAN_T_END);
 		goto fail;
 	}
 
 	backend_t *be = remote_backend(rem);
 	if (be == NULL) {
-		warn("remote_backend");
+		bunyan_trace(rem->rem_log, "could not find backend for remote",
+		    BUNYAN_T_END);
 		goto fail;
 	}
 	prx->prx_backend = be->be_id;
@@ -268,7 +331,8 @@ bbal_tcp_incoming(cserver_t *cserver, int event)
 	if (bunyan_child(g_log, &prx->prx_log,
 	    BUNYAN_T_UINT32, "backend", be->be_id,
 	    BUNYAN_T_UINT32, "conn_id", prx->prx_id,
-	    BUNYAN_T_STRING, "remote_ip", cconn_remote_addr_str(prx->prx_front),
+	    BUNYAN_T_IP, "remote_ip", &sin->sin_addr,
+	    BUNYAN_T_UINT32, "remote_port", (uint32_t)ntohs(sin->sin_port),
 	    BUNYAN_T_END) != 0) {
 		err(1, "bunyan_child");
 	}
