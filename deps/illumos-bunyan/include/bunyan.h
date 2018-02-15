@@ -81,6 +81,8 @@ extern int bunyan_warn(bunyan_logger_t *, const char *msg, ...);
 extern int bunyan_error(bunyan_logger_t *, const char *msg, ...);
 extern int bunyan_fatal(bunyan_logger_t *, const char *msg, ...);
 
+extern int bunyan_parse_level(const char *, int *);
+
 #ifdef __cplusplus
 }
 #endif

@@ -999,3 +999,30 @@ bunyan_fatal(bunyan_logger_t *bhp, const char *msg, ...)
 
 	return (ret);
 }
+
+int
+bunyan_parse_level(const char *str, int *levelp)
+{
+	struct level {
+		char *lvl_name;
+		int lvl_num;
+	} levels[] = {
+		{ .lvl_name = "trace",	.lvl_num = BUNYAN_L_TRACE },
+		{ .lvl_name = "debug",	.lvl_num = BUNYAN_L_DEBUG },
+		{ .lvl_name = "info",	.lvl_num = BUNYAN_L_INFO },
+		{ .lvl_name = "warn",	.lvl_num = BUNYAN_L_WARN },
+		{ .lvl_name = "error",	.lvl_num = BUNYAN_L_ERROR },
+		{ .lvl_name = "fatal",	.lvl_num = BUNYAN_L_FATAL },
+		{ .lvl_name = NULL,	.lvl_num = 0 },
+	};
+
+	for (unsigned i = 0; levels[i].lvl_name != NULL; i++) {
+		if (strcmp(levels[i].lvl_name, str) == 0) {
+			*levelp = levels[i].lvl_num;
+			return (0);
+		}
+	}
+
+	errno = EINVAL;
+	return (-1);
+}
