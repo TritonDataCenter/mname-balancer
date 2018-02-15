@@ -171,11 +171,31 @@ backend_create(cloop_t *loop, const char *path, backend_t **bep)
 	be->be_ok = B_FALSE;
 	be->be_reconnect = B_TRUE;
 
-	/*
-	 * Determine the next available backend ID.
-	 */
-	backend_t *be_max = avl_last(&g_backends);
-	be->be_id = be_max != NULL ? be_max->be_id + 1 : 1;
+	const char *bn = strrchr(path, '/');
+	if (bn != NULL) {
+		int pathid = atoi(bn + 1);
+
+		/*
+		 * By convention, binder will be creating socket names that
+		 * match the high numbered port on which the instance will
+		 * listen for direct DNS queries.  If this socket has a name
+		 * that appears to fit in the expected range, use that number
+		 * as the backend ID to make the logs easier to reason about.
+		 */
+		if (pathid >= 5300 && pathid <= 5399) {
+			if (backend_lookup(pathid) == NULL) {
+				be->be_id = pathid;
+			}
+		}
+	}
+
+	if (be->be_id == 0) {
+		/*
+		 * Determine the next available backend ID.
+		 */
+		backend_t *be_max = avl_last(&g_backends);
+		be->be_id = be_max != NULL ? be_max->be_id + 1 : 1;
+	}
 
 	/*
 	 * We reserve ID 0 to mean no backend is assigned.
