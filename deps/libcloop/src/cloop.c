@@ -265,6 +265,12 @@ cloop_ent_data_set(cloop_ent_t *clent, void *data)
 	clent->clent_data = data;
 }
 
+cloop_t *
+cloop_ent_loop(cloop_ent_t *clent)
+{
+	return (clent->clent_loop);
+}
+
 void
 cloop_attach_ent(cloop_t *cloop, cloop_ent_t *clent, int fd)
 {
@@ -307,6 +313,7 @@ cloop_attach_ent_timer(cloop_t *cloop, cloop_ent_t *clent, int interval)
 
 	clent->clent_type = CLOOP_ENT_TYPE_TIMER;
 	clent->clent_timer = timer;
+	clent->clent_loop = cloop;
 
 	return (0);
 }
