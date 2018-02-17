@@ -357,15 +357,14 @@ cconn_abort(cconn_t *ccn)
 
 	/*
 	 * Enable an immediate close of the connection by setting SO_LINGER
-	 * with a timeout of zero.
+	 * with a timeout of zero.  It's possible that the socket is not in a
+	 * valid state for this option to be set, so we ignore any errors.
 	 */
 	struct linger l;
 	l.l_onoff = 1;
 	l.l_linger = 0;
-	if (setsockopt(cloop_ent_fd(ccn->ccn_clent), SOL_SOCKET, SO_LINGER,
-	    &l, sizeof (l)) != 0) {
-		return (-1);
-	}
+	(void) setsockopt(cloop_ent_fd(ccn->ccn_clent), SOL_SOCKET, SO_LINGER,
+	    &l, sizeof (l));
 
 	cconn_advance_state(ccn, CCONN_ST_CLOSED);
 	return (0);
@@ -625,7 +624,10 @@ cconn_on_read(cloop_ent_t *clent, int ev)
 
 	size_t av;
 	if ((av = cbufq_available(ccn->ccn_recvq)) >= ccn->ccn_recvq_max) {
-		fprintf(stderr, "CCONN[%p] READ TOO MUCH (%d)\n", ccn, av);
+		if (cserver_debug) {
+			fprintf(stderr, "CCONN[%p] READ TOO MUCH (%d)\n", ccn,
+			    av);
+		}
 		return;
 	}
 
