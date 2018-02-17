@@ -7,6 +7,7 @@
 #include <err.h>
 #include <sys/debug.h>
 #include <strings.h>
+#include <errno.h>
 
 #include <sys/list.h>
 
@@ -15,6 +16,7 @@
 #include "libcloop_impl.h"
 
 static void cloop_ent_free_impl(cloop_ent_t *clent);
+static void cloop_run_one_event(cloop_t *cloop, port_event_t *pe);
 
 int
 cloop_alloc(cloop_t **cloopp)
@@ -55,7 +57,6 @@ int
 cloop_run(cloop_t *cloop, unsigned int *again)
 {
 	int port = cloop->cloop_port;
-	port_event_t pe;
 
 	if (list_is_empty(&cloop->cloop_ents)) {
 		*again = 0;
@@ -86,15 +87,34 @@ cloop_run(cloop_t *cloop, unsigned int *again)
 		}
 	}
 
-	if (port_get(port, &pe, NULL) != 0) {
-		err(1, "port_get failure");
+	port_event_t pe[32];
+	uint_t nget;
+again:
+	nget = 1;
+	if (port_getn(port, pe, 32, &nget, NULL) != 0) {
+		if (errno == EINTR || errno == EAGAIN) {
+			goto again;
+		}
+
+		err(1, "port_getn failure");
+	}
+	VERIFY3U(nget, >, 0);
+
+	for (uint_t i = 0; i < nget; i++) {
+		cloop_run_one_event(cloop, &pe[i]);
 	}
 
-	switch (pe.portev_source) {
+	return (0);
+}
+
+static void
+cloop_run_one_event(cloop_t *cloop, port_event_t *pe)
+{
+	switch (pe->portev_source) {
 	case PORT_SOURCE_FD: {
-		cloop_ent_t *clent = pe.portev_user;
+		cloop_ent_t *clent = pe->portev_user;
 		VERIFY(clent->clent_type == CLOOP_ENT_TYPE_FD);
-		VERIFY(clent->clent_fd == (int)pe.portev_object);
+		VERIFY(clent->clent_fd == (int)pe->portev_object);
 		clent->clent_reassoc = 1;
 
 		/*
@@ -103,17 +123,17 @@ cloop_run(cloop_t *cloop, unsigned int *again)
 		 */
 		clent->clent_active = 1;
 
-		int handle_events = pe.portev_events & (POLLIN | POLLOUT);
-		pe.portev_events &= ~handle_events;
+		int handle_events = pe->portev_events & (POLLIN | POLLOUT);
+		pe->portev_events &= ~handle_events;
 
-		if (pe.portev_events & (POLLHUP | POLLERR)) {
+		if (pe->portev_events & (POLLHUP | POLLERR)) {
 			/*
 			 * If there is an error or a hangup, fire both the
 			 * read and write callbacks so that those functions
 			 * may check for errors.
 			 */
 			handle_events |= POLLIN | POLLOUT;
-			pe.portev_events &= ~(POLLHUP | POLLERR);
+			pe->portev_events &= ~(POLLHUP | POLLERR);
 		}
 
 		if (!clent->clent_destroy && (handle_events & POLLIN)) {
@@ -138,8 +158,8 @@ cloop_run(cloop_t *cloop, unsigned int *again)
 			break;
 		}
 
-		if (pe.portev_events != 0) {
-			warnx("unknown events %x", pe.portev_events);
+		if (pe->portev_events != 0) {
+			warnx("unknown events %x", pe->portev_events);
 			abort();
 		}
 
@@ -149,7 +169,7 @@ cloop_run(cloop_t *cloop, unsigned int *again)
 	} break;
 
 	case PORT_SOURCE_TIMER: {
-		cloop_ent_t *clent = pe.portev_user;
+		cloop_ent_t *clent = pe->portev_user;
 		VERIFY(clent->clent_type == CLOOP_ENT_TYPE_TIMER);
 
 		clent->clent_active = 1;
@@ -167,8 +187,6 @@ cloop_run(cloop_t *cloop, unsigned int *again)
 		}
 	} break;
 	}
-
-	return (0);
 }
 
 void
