@@ -41,25 +41,26 @@ CFLAGS =	-Wall -Wextra -Werror \
 		-O0 -gdwarf-2 \
 		-fno-inline-small-functions \
 		$(INCS:%=-I%)
-		#-I$(TOP)/deps/smartos/include \
 
 OBJ_DIR =	obj
 
+CTFCONVERT =	/opt/ctf/bin/ctfconvert
+CC =		gcc
+GIT =		git
+
 $(PROG): $(OBJS:%=$(OBJ_DIR)/%) $(DEPS_LIBS:%=$(OBJ_DIR)/%)
-	gcc $(CFLAGS) -o $@ $(OBJS:%=$(OBJ_DIR)/%) $(OBJ_DIR)/bunyan_provider.o $(LIBS)
-	/opt/ctf/bin/ctfconvert -o $@ $@
+	$(CC) $(CFLAGS) -o $@ $(OBJS:%=$(OBJ_DIR)/%) \
+	    $(OBJ_DIR)/bunyan_provider.o $(LIBS)
+	$(CTFCONVERT) -o $@ $@
 
 $(OBJ_DIR):
 	mkdir -p $@
 
 $(OBJ_DIR)/%.o: %.c $(HEADERS) | $(OBJ_DIR)
-	gcc -c $(CFLAGS) -o $@ $<
+	$(CC) -c $(CFLAGS) -o $@ $<
 
 $(OBJ_DIR)/%.o: deps/libcloop/src/%.c | $(OBJ_DIR)
-	gcc -c $(CFLAGS) -o $@ $<
-
-#%.o: deps/smartos/src/%.c
-#	gcc -c $(CFLAGS) -o $@ $<
+	$(CC) -c $(CFLAGS) -o $@ $<
 
 $(OBJ_DIR)/illumos_list.a: | deps/illumos-list/.git $(OBJ_DIR)
 	cd deps/illumos-list && $(MAKE) BUILD_DIR=$(TOP)/$(OBJ_DIR) \
@@ -74,7 +75,7 @@ $(OBJ_DIR)/libcbuf.a: | deps/libcbuf/.git $(OBJ_DIR)
 	    DESTDIR=$(TOP)/$(OBJ_DIR) EXTRA_CFLAGS=-pthread
 
 deps/%/.git:
-	git submodule update --init --recursive
+	$(GIT) submodule update --init --recursive
 
 clean:
 	rm -f $(PROG)

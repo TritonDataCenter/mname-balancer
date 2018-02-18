@@ -8,11 +8,31 @@
  * Copyright (c) 2018, Joyent, Inc.
  */
 
+/*
+ * TCP PROXY
+ *
+ * In addition to the classical use of UDP packets for DNS requests and
+ * responses, modern DNS servers will also answer queries via TCP connections.
+ * This file is responsible for forwarding those TCP connections to the backend
+ * DNS processes.
+ *
+ * A TCP listen port is established at program startup; see
+ * "bbal_tcp_listen()".  For each connection received on this port, a new local
+ * session is established to the appropriate backend.  After an initial header
+ * which informs the backend process of the source IP and port for the incoming
+ * connection, data is forwarded verbatim without additional framing.  The same
+ * backend association (see "backend.c" and "remotes.c") that is used for UDP
+ * packets is also used for incoming TCP connections.
+ */
+
 #include "bbal.h"
 
 uint32_t g_tcp_conn_count = 0;
-uint32_t g_active = 0;
 
+/*
+ * This object tracks the lifecycle of a single connection from a remote peer
+ * to a backend DNS process through a local socket.
+ */
 typedef struct {
 	uint32_t prx_id;
 	uint32_t prx_backend;
@@ -23,10 +43,26 @@ typedef struct {
 	timeout_t *prx_connect_timeout;
 } proxy_t;
 
+/*
+ * Abort all connections for this proxy object.
+ */
 static void
 bbal_tcp_teardown(proxy_t *prx)
 {
 	bunyan_debug(prx->prx_log, "TCP teardown", BUNYAN_T_END);
+
+	if (prx->prx_front == NULL && prx->prx_back == NULL) {
+		/*
+		 * No connections have been established, so there will not be
+		 * a subsequent CLOSE event.  Free the remaining resources now.
+		 */
+		if (prx->prx_log != NULL) {
+			bunyan_fini(prx->prx_log);
+		}
+		timeout_free(prx->prx_connect_timeout);
+		free(prx);
+		return;
+	}
 
 	timeout_clear(prx->prx_connect_timeout);
 
@@ -38,6 +74,9 @@ bbal_tcp_teardown(proxy_t *prx)
 	}
 }
 
+/*
+ * Called when data arrives from the remote peer.
+ */
 static void
 bbal_tcp_front_data(cconn_t *ccn, int event)
 {
@@ -85,6 +124,9 @@ bbal_tcp_front_data(cconn_t *ccn, int event)
 	cconn_more_data(prx->prx_front);
 }
 
+/*
+ * Called when a connection to the backend is established.
+ */
 static void
 bbal_tcp_back_connect(cconn_t *ccn, int event)
 {
@@ -98,25 +140,44 @@ bbal_tcp_back_connect(cconn_t *ccn, int event)
 	}
 
 	/*
-	 * Connected to backend.  First send our preamble frame which identifies
-	 * the remote peer to the backend, then start the flow of data.
+	 * Send the preamble frame which identifies the remote peer to the
+	 * backend.  Once the appropriate response is received, the flow of
+	 * data will begin.
+	 *
+	 * Note that we do not cancel the connection timeout until that
+	 * response arrives.
 	 */
 	cbuf_t *buf;
 	if (cbuf_alloc(&buf, 2048) != 0) {
-		err(1, "cbuf_alloc backend connect");
+		bunyan_warn(prx->prx_log, "backend hello frame alloc failed",
+		    BUNYAN_T_INT32, "errno", (int32_t)errno,
+		    BUNYAN_T_STRING, "strerror", strerror(errno),
+		    BUNYAN_T_END);
+		bbal_tcp_teardown(prx);
+		return;
 	}
 	cbuf_byteorder_set(buf, CBUF_ORDER_LITTLE_ENDIAN);
 
 	const struct sockaddr_in *sin = cconn_sockaddr_in(prx->prx_front);
-	VERIFY0(cbuf_put_u32(buf, FRAME_TYPE_INBOUND_TCP)); /* FRAME TYPE */
-	VERIFY0(cbuf_put_u32(buf, ntohl(sin->sin_addr.s_addr))); /* IP */
-	VERIFY0(cbuf_put_u32(buf, ntohs(sin->sin_port))); /* PORT */
+	VERIFY0(cbuf_put_u32(buf, FRAME_TYPE_INBOUND_TCP));
+	VERIFY0(cbuf_put_u32(buf, ntohl(sin->sin_addr.s_addr)));
+	VERIFY0(cbuf_put_u32(buf, ntohs(sin->sin_port)));
 
 	if (cconn_send(ccn, buf) != 0) {
-		err(1, "cconn_send backend hello frame");
+		bunyan_warn(prx->prx_log, "backend hello frame send failed",
+		    BUNYAN_T_INT32, "errno", (int32_t)errno,
+		    BUNYAN_T_STRING, "strerror", strerror(errno),
+		    BUNYAN_T_END);
+		cbuf_free(buf);
+		bbal_tcp_teardown(prx);
+		return;
 	}
 }
 
+/*
+ * Called when data arrives from the backend server process via the local
+ * socket session.
+ */
 static void
 bbal_tcp_back_data(cconn_t *ccn, int event)
 {
@@ -124,7 +185,7 @@ bbal_tcp_back_data(cconn_t *ccn, int event)
 	cbufq_t *q = cconn_recvq(ccn);
 	cbuf_t *b;
 
-	bunyan_trace(prx->prx_log, "TCP frontend data", BUNYAN_T_END);
+	bunyan_trace(prx->prx_log, "TCP backend data", BUNYAN_T_END);
 
 	if (!prx->prx_flowing) {
 		/*
@@ -139,13 +200,19 @@ bbal_tcp_back_data(cconn_t *ccn, int event)
 				goto done;
 			}
 
-			err(1, "cbufq_pullup");
+			bunyan_fatal(prx->prx_log, "could not pullup",
+			    BUNYAN_T_INT32, "errno", (int32_t)errno,
+			    BUNYAN_T_STRING, "strerror", strerror(errno),
+			    BUNYAN_T_END);
+			exit(1);
 			return;
 		}
 
-		b = cbufq_peek(q);
+		/*
+		 * Read the frame type from the head of the buffer queue.
+		 */
 		uint32_t frame_type;
-		VERIFY0(cbuf_get_u32(b, &frame_type));
+		VERIFY0(cbuf_get_u32(cbufq_peek(q), &frame_type));
 
 		if (frame_type != FRAME_TYPE_INBOUND_TCP_OK) {
 			bunyan_warn(prx->prx_log, "backend invalid TCP OK",
@@ -159,7 +226,8 @@ bbal_tcp_back_data(cconn_t *ccn, int event)
 		timeout_clear(prx->prx_connect_timeout);
 
 		/*
-		 * Start the flow of data from the frontend.
+		 * Start the flow of data from the frontend.  From this point
+		 * on, data is passed verbatim without framing.
 		 */
 		prx->prx_flowing = B_TRUE;
 		bbal_tcp_front_data(prx->prx_front, CCONN_CB_DATA_AVAILABLE);
@@ -195,6 +263,10 @@ done:
 	cconn_more_data(prx->prx_back);
 }
 
+/*
+ * Called when either the frontend or backend connection has finished sending
+ * data.  The stream EOF is propagated to the other connection.
+ */
 static void
 bbal_tcp_end(cconn_t *ccn, int event)
 {
@@ -211,6 +283,10 @@ bbal_tcp_end(cconn_t *ccn, int event)
 	}
 }
 
+/*
+ * Called when either the frontend or backend connection has experienced an
+ * error.
+ */
 static void
 bbal_tcp_error(cconn_t *ccn, int event)
 {
@@ -224,6 +300,11 @@ bbal_tcp_error(cconn_t *ccn, int event)
 	bbal_tcp_teardown(prx);
 }
 
+/*
+ * Called when either the frontend or backend connection has been completely
+ * torn down for whatever reason.  Once both have been torn down, free the
+ * remaining
+ */
 static void
 bbal_tcp_close(cconn_t *ccn, int event)
 {
@@ -231,15 +312,22 @@ bbal_tcp_close(cconn_t *ccn, int event)
 
 	VERIFY3S(event, ==, CCONN_CB_CLOSE);
 
+	/*
+	 * Determine which connection was closed this time around.
+	 */
 	if (ccn == prx->prx_front) {
 		bunyan_debug(prx->prx_log, "frontend connection closed",
 		    BUNYAN_T_END);
 		prx->prx_front = NULL;
-	}
-	if (ccn == prx->prx_back) {
+	} else if (ccn == prx->prx_back) {
 		bunyan_debug(prx->prx_log, "backend connection closed",
 		    BUNYAN_T_END);
 		prx->prx_back = NULL;
+	} else {
+		/*
+		 * What connection is this?!
+		 */
+		abort();
 	}
 
 	if (prx->prx_front != NULL || prx->prx_back != NULL) {
@@ -253,11 +341,14 @@ bbal_tcp_close(cconn_t *ccn, int event)
 	bunyan_fini(prx->prx_log);
 	timeout_free(prx->prx_connect_timeout);
 	free(prx);
-
-	VERIFY3U(g_active, >, 0);
-	g_active--;
 }
 
+/*
+ * This timeout callback is scheduled when we begin the process of connecting
+ * to the backend to forward a new TCP connection.  The timeout is cleared
+ * once the session is established and forwarding has begun; if the timeout
+ * executes, we have waited too long and we abandon the attempt.
+ */
 static void
 bbal_tcp_connect_timeout(timeout_t *to, void *arg)
 {
@@ -274,6 +365,11 @@ bbal_tcp_connect_timeout(timeout_t *to, void *arg)
 	bbal_tcp_teardown(prx);
 }
 
+/*
+ * This callback is triggered when an incoming connection has arrived on the
+ * TCP listen port.  The connection is accepted and the process of establishing
+ * a session to the appropriate backend is initiated.
+ */
 static void
 bbal_tcp_incoming(cserver_t *cserver, int event)
 {
@@ -302,8 +398,6 @@ bbal_tcp_incoming(cserver_t *cserver, int event)
 		free(prx);
 		return;
 	}
-
-	g_active++;
 
 	const struct sockaddr_in *sin = cconn_sockaddr_in(prx->prx_front);
 	bunyan_debug(g_log, "inbound TCP connection",
@@ -339,7 +433,11 @@ bbal_tcp_incoming(cserver_t *cserver, int event)
 	    BUNYAN_T_IP, "remote_ip", &sin->sin_addr,
 	    BUNYAN_T_UINT32, "remote_port", (uint32_t)ntohs(sin->sin_port),
 	    BUNYAN_T_END) != 0) {
-		err(1, "bunyan_child");
+		bunyan_warn(g_log, "incoming TCP failure (bunyan child)",
+		    BUNYAN_T_INT32, "errno", (int32_t)errno,
+		    BUNYAN_T_STRING, "strerror", strerror(errno),
+		    BUNYAN_T_END);
+		goto fail;
 	}
 
 	bunyan_trace(prx->prx_log, "connecting to backend", BUNYAN_T_END);
@@ -382,9 +480,11 @@ fail:
 		rem->rem_stat_tcp_drop++;
 	}
 	bbal_tcp_teardown(prx);
-	free(prx);
 }
 
+/*
+ * Called at program startup to establish the front end TCP listen socket.
+ */
 int
 bbal_tcp_listen(cserver_t *tcp, cloop_t *loop, const char *listen_ip,
     const char *listen_port)

@@ -8,6 +8,17 @@
  * Copyright (c) 2018, Joyent, Inc.
  */
 
+/*
+ * TIMEOUTS
+ *
+ * This subsystem allows for the one-shot scheduling of a function at some time
+ * in the future.  Execution time is specified as an interval (in seconds)
+ * relative to the current time.  Future executions are arranged in an AVL
+ * sorted by execution time.  Precise timing is not available; the only
+ * guarantee is that timeout callbacks will be called at some point after their
+ * scheduled execution time.
+ */
+
 #include "bbal.h"
 
 static avl_tree_t g_timeouts;

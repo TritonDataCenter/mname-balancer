@@ -8,6 +8,22 @@
  * Copyright (c) 2018, Joyent, Inc.
  */
 
+/*
+ * UDP PROXY
+ *
+ * DNS requests from remote peers frequently arrive as UDP packets.  This file
+ * contains routines to distribute those requests to a set of backend DNS
+ * server processes, and to forward the subsequent DNS responses back to remote
+ * clients.
+ *
+ * A UDP listen socket is bound at program startup; see "bbal_udp_listen()".
+ * Each packet received on this socket is encapsulated into a framed message
+ * for a particular backend DNS server.  The message includes the source IP and
+ * port for the remote peer.  Once the backend server has prepared a response,
+ * a similar framed message is passed back and a UDP packet is sent on behalf
+ * of the backend.
+ */
+
 #include "bbal.h"
 
 static int

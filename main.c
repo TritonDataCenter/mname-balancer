@@ -8,8 +8,29 @@
  * Copyright (c) 2018, Joyent, Inc.
  */
 
+/*
+ * BINDER LOAD BALANCER
+ *
+ * This program is a simple DNS load balancer built to work with the Node-based
+ * "node-mname" DNS server library, as used in the "binder" service discovery
+ * server.  A listen socket is established for both TCP and UDP on the
+ * nominated DNS server port to receive requests from remote peers.  A pool of
+ * connections to backend server processes are maintained via local sockets
+ * (AF_UNIX).
+ *
+ * The program is broken up into different subsystems.  Each file has a comment
+ * which describes the particular subsystem.  Of particular note is the
+ * description of the protocol that forms an interface between this program
+ * and "node-mname", which appears in "backends.c".
+ */
+
 #include "bbal.h"
 
+/*
+ * This is the root bunyan logger.  It should only be used when a more specific
+ * child logger is not available; e.g., each backend object has a child logger
+ * which includes the identity of the backend.
+ */
 bunyan_logger_t *g_log;
 
 /*
@@ -117,7 +138,7 @@ main(int argc, char *argv[])
 		}
 	}
 
-	if (bunyan_init("bender", &g_log) != 0) {
+	if (bunyan_init("mname-balancer", &g_log) != 0) {
 		err(1, "bunyan_init");
 	}
 	if (bunyan_stream_add(g_log, "stdout", level, bunyan_stream_fd,

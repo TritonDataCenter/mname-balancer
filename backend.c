@@ -546,7 +546,11 @@ bbal_uds_data(cconn_t *ccn, int event)
 				return;
 			}
 
-			err(1, "cbufq_pullup");
+			bunyan_fatal(be->be_log, "could not pullup",
+			    BUNYAN_T_INT32, "errno", (int32_t)errno,
+			    BUNYAN_T_STRING, "strerror", strerror(errno),
+			    BUNYAN_T_END);
+			exit(1);
 			return;
 		}
 
@@ -1003,15 +1007,18 @@ backends_refresh()
 	VERIFY0(closedir(sockdir));
 }
 
+/*
+ * Checks to make sure that remotes are reasonably balanced across the set of
+ * currently active backends.  If this is not the case, reset the association
+ * of some number of remotes that are presently assigned to the backend with
+ * the most remotes assigned.  This function is run periodically from a timer.
+ */
 void
 backends_rebalance(void)
 {
 	/*
-	 * Keep track of the minimum and the maximum count of remotes per
-	 * backend.  If there is a spread of more than 2 remotes per backend
-	 * between the minimum and maximum, then unassign one of the remotes
-	 * for the maximum backend.
-	 * XXX Reword this comment.
+	 * Determine the minimum and the maximum count of remotes per backend
+	 * for all backends.
 	 */
 	int32_t max_count = -1;
 	uint32_t max_backend_id = 0;
