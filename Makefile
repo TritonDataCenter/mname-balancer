@@ -1,4 +1,12 @@
+#
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+#
 
+#
+# Copyright (c) 2018, Joyent, Inc.
+#
 
 TOP =		$(PWD)
 
@@ -10,7 +18,9 @@ OBJS =		main.o \
 		cserver.o \
 		tcp_proxy.o \
 		udp_proxy.o \
-		backend.o
+		backend.o \
+		remotes.o \
+		timeouts.o
 
 HEADERS =	bbal.h
 
@@ -29,6 +39,7 @@ CFLAGS =	-Wall -Wextra -Werror \
 		-Wno-unused-parameter \
 		-std=c99 -D__EXTENSIONS__ -pthread \
 		-O0 -gdwarf-2 \
+		-fno-inline-small-functions \
 		$(INCS:%=-I%)
 		#-I$(TOP)/deps/smartos/include \
 

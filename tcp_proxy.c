@@ -1,29 +1,12 @@
+/*
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ */
 
-
-
-#include <stdlib.h>
-#include <stdio.h>
-#include <stddef.h>
-#include <inttypes.h>
-#include <unistd.h>
-#include <strings.h>
-#include <err.h>
-#include <errno.h>
-#include <port.h>
-
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <sys/un.h>
-
-#include <sys/debug.h>
-#include <sys/list.h>
-#include <sys/avl.h>
-
-#include <libcbuf.h>
-#include <libcloop.h>
-#include <bunyan.h>
+/*
+ * Copyright (c) 2018, Joyent, Inc.
+ */
 
 #include "bbal.h"
 
@@ -37,12 +20,15 @@ typedef struct {
 	cconn_t *prx_front;
 	cconn_t *prx_back;
 	boolean_t prx_flowing;
+	timeout_t *prx_connect_timeout;
 } proxy_t;
 
 static void
 bbal_tcp_teardown(proxy_t *prx)
 {
 	bunyan_debug(prx->prx_log, "TCP teardown", BUNYAN_T_END);
+
+	timeout_clear(prx->prx_connect_timeout);
 
 	if (prx->prx_front != NULL) {
 		cconn_abort(prx->prx_front);
@@ -170,6 +156,7 @@ bbal_tcp_back_data(cconn_t *ccn, int event)
 		}
 
 		bunyan_trace(prx->prx_log, "backend reports TCP OK");
+		timeout_clear(prx->prx_connect_timeout);
 
 		/*
 		 * Start the flow of data from the frontend.
@@ -264,19 +251,37 @@ bbal_tcp_close(cconn_t *ccn, int event)
 
 	bunyan_debug(prx->prx_log, "proxy connection finished", BUNYAN_T_END);
 	bunyan_fini(prx->prx_log);
+	timeout_free(prx->prx_connect_timeout);
 	free(prx);
 
 	VERIFY3U(g_active, >, 0);
 	g_active--;
 }
 
-void
+static void
+bbal_tcp_connect_timeout(timeout_t *to, void *arg)
+{
+	proxy_t *prx = arg;
+
+	bunyan_error(prx->prx_log, "timed out connecting to backend",
+	    BUNYAN_T_END);
+
+	backend_t *be;
+	if ((be = backend_lookup(prx->prx_backend)) != NULL) {
+		bbal_backend_fault(be);
+	}
+
+	bbal_tcp_teardown(prx);
+}
+
+static void
 bbal_tcp_incoming(cserver_t *cserver, int event)
 {
 	VERIFY3S(event, ==, CSERVER_CB_INCOMING);
 
 	proxy_t *prx;
-	if ((prx = calloc(1, sizeof (*prx))) == NULL) {
+	if ((prx = calloc(1, sizeof (*prx))) == NULL ||
+	    timeout_alloc(&prx->prx_connect_timeout) != 0) {
 		/*
 		 * Abort here.  We could instead wait for more memory, but we'd
 		 * need to remember to call "cserver_accept()" later or this
@@ -342,9 +347,18 @@ bbal_tcp_incoming(cserver_t *cserver, int event)
 	/*
 	 * Begin connecting to the backend.
 	 */
-	if (bbal_connect_uds_tcp(be, &prx->prx_back) != 0) {
+	if (bbal_connect_uds_common(be, &prx->prx_back) != 0) {
 		goto fail;
 	}
+
+	/*
+	 * If the connection has not been established in 10 seconds, we'll tear
+	 * it down.  This connection happens in line with request processing,
+	 * so a longer timeout would be visible to clients when a backend is
+	 * failing.
+	 */
+	timeout_set(prx->prx_connect_timeout, 10, bbal_tcp_connect_timeout,
+	    prx);
 
 	rem->rem_stat_tcp++;
 
@@ -369,4 +383,27 @@ fail:
 	}
 	bbal_tcp_teardown(prx);
 	free(prx);
+}
+
+int
+bbal_tcp_listen(cserver_t *tcp, cloop_t *loop, const char *listen_ip,
+    const char *listen_port)
+{
+	cserver_on(tcp, CSERVER_CB_INCOMING, bbal_tcp_incoming);
+	if (cserver_listen_tcp(tcp, loop, listen_ip, listen_port) != 0) {
+		bunyan_fatal(g_log, "failed to create TCP listen socket",
+		    BUNYAN_T_STRING, "address", listen_ip,
+		    BUNYAN_T_STRING, "port", listen_port,
+		    BUNYAN_T_INT32, "errno", (int32_t)errno,
+		    BUNYAN_T_STRING, "strerror", strerror(errno),
+		    BUNYAN_T_END);
+		return (-1);
+	}
+
+	bunyan_info(g_log, "listening for TCP packets",
+	    BUNYAN_T_STRING, "address", listen_ip,
+	    BUNYAN_T_STRING, "port", listen_port,
+	    BUNYAN_T_END);
+
+	return (0);
 }

@@ -1,32 +1,14 @@
+/*
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ */
 
-
-
-#include <stdlib.h>
-#include <stdio.h>
-#include <stddef.h>
-#include <inttypes.h>
-#include <unistd.h>
-#include <strings.h>
-#include <err.h>
-#include <errno.h>
-#include <port.h>
-
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <sys/un.h>
-
-#include <sys/debug.h>
-#include <sys/list.h>
-#include <sys/avl.h>
-
-#include <libcbuf.h>
-#include <libcloop.h>
-#include <bunyan.h>
+/*
+ * Copyright (c) 2018, Joyent, Inc.
+ */
 
 #include "bbal.h"
-
 
 static int
 bbal_parse_ipv4addr(const char *ipaddr, const char *port,
@@ -220,25 +202,17 @@ again:
 	cbuf_rewind(buf);
 
 	/*
-	 * An inbound UDP packet is wrapped in a frame of type 2.  The header
-	 * consists of four little endian numbers, followed by the data from
-	 * the packet.
-	 *
-	 * 	OFFSET	LENGTH	DESCRIPTION
-	 * 	--------------------------------------------------------------
-	 * 	0	4	frame type (INBOUND_UDP = 2)
-	 * 	4	4	IPv4 address of remote peer
-	 * 	8	4	UDP source port for this packet
-	 * 	12	4	length of data in frame (not including header)
-	 * 	--------------------------------------------------------------
-	 * 	16	N	frame data
-	 * 	--------------------------------------------------------------
+	 * An inbound UDP packet is wrapped in an INBOUND_UDP frame.  See
+	 * the protocol description in "backend.c".
 	 */
-	VERIFY0(cbuf_put_u32(buf, 2)); /* FRAME TYPE */
-	VERIFY0(cbuf_put_u32(buf, ntohl(sin->sin_addr.s_addr))); /* IP */
-	VERIFY0(cbuf_put_u32(buf, ntohs(sin->sin_port))); /* PORT */
-	VERIFY0(cbuf_put_u32(buf, (uint32_t)rsz)); /* FRAME DATA LENGTH */
+	VERIFY0(cbuf_put_u32(buf, FRAME_TYPE_INBOUND_UDP));
+	VERIFY0(cbuf_put_u32(buf, ntohl(sin->sin_addr.s_addr)));
+	VERIFY0(cbuf_put_u32(buf, ntohs(sin->sin_port)));
+	VERIFY0(cbuf_put_u32(buf, (uint32_t)rsz));
 
+	/*
+	 * Return the buffer position to the end of the UDP packet data.
+	 */
 	VERIFY0(cbuf_position_set(buf, p));
 
 	bunyan_trace(be->be_log, "forwarding UDP packet to backend",
@@ -278,13 +252,11 @@ again:
 		goto another_packet;
 	}
 
+bail:
+	cbuf_free(buf);
+
 	/*
 	 * Ask for more UDP packets.
 	 */
-	cloop_ent_want(ent, CLOOP_CB_READ);
-	return;
-
-bail:
-	cbuf_free(buf);
 	cloop_ent_want(ent, CLOOP_CB_READ);
 }
