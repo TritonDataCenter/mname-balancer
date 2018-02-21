@@ -115,6 +115,15 @@
 
 #include "bbal.h"
 
+/*
+ * When a backend connection is established, we will send a periodic heartbeat
+ * request to ensure the session is responsive.  If a response does not arrive
+ * within the expected time, the connection to the backend will be marked
+ * faulted.
+ */
+#define	HEARTBEAT_INTERVAL		5
+#define	HEARTBEAT_TIMEOUT		15
+
 static avl_tree_t g_backends;
 static avl_tree_t g_backends_by_path;
 
@@ -250,10 +259,6 @@ backend_create(cloop_t *loop, const char *path, backend_t **bep)
 	}
 
 	if ((be->be_path = strdup(path)) == NULL) {
-		goto fail;
-	}
-
-	if (cbufq_alloc(&be->be_input) != 0) {
 		e = errno;
 		goto fail;
 	}
@@ -267,6 +272,7 @@ backend_create(cloop_t *loop, const char *path, backend_t **bep)
 
 	be->be_loop = loop;
 	be->be_ok = B_FALSE;
+	be->be_heartbeat_outstanding = B_FALSE;
 	be->be_reconnect = B_FALSE;
 
 	const char *bn = strrchr(path, '/');
@@ -322,7 +328,6 @@ fail:
 	if (be->be_log != NULL) {
 		bunyan_fini(be->be_log);
 	}
-	cbufq_free(be->be_input);
 	free(be->be_path);
 	timeout_free(be->be_connect_timeout);
 	timeout_free(be->be_reconnect_timeout);
@@ -385,6 +390,7 @@ bbal_backend_reconnect(backend_t *be)
 	 * reconnect cycle is complete.
 	 */
 	be->be_ok = B_FALSE;
+	be->be_heartbeat_outstanding = B_FALSE;
 
 	if (be->be_conn != NULL) {
 		/*
@@ -429,6 +435,7 @@ bbal_backend_fault(backend_t *be)
 		    "reconnect)", BUNYAN_T_END);
 	}
 	be->be_ok = B_FALSE;
+	be->be_heartbeat_outstanding = B_FALSE;
 
 	/*
 	 * Trigger a reconnection.
@@ -459,10 +466,8 @@ backend_no_heartbeat(timeout_t *to, void *arg)
 	 * We have an outstanding heartbeat for which we have not received a
 	 * reply in a reasonable time frame.  Terminate this connection.
 	 */
-	bunyan_error(be->be_log, "no heartbeat from backend (aborting "
-	    "connection)", BUNYAN_T_END);
-	be->be_ok = B_FALSE;
-	cconn_abort(be->be_conn);
+	bunyan_error(be->be_log, "no heartbeat from backend", BUNYAN_T_END);
+	bbal_backend_fault(be);
 }
 
 /*
@@ -497,14 +502,16 @@ backend_send_heartbeat(timeout_t *to, void *arg)
 		goto rearm;
 	}
 
+	be->be_heartbeat_outstanding = B_TRUE;
 	bunyan_trace(be->be_log, "heartbeat sent", BUNYAN_T_END);
 
 	/*
-	 * Use our existing heartbeat timeout object to wait for up to 15
-	 * seconds for a response to our heartbeat frame.  This timeout
-	 * will be cleared if the response arrives before it expires.
+	 * Use our existing heartbeat timeout object to wait for a response to
+	 * our heartbeat frame.  This timeout will be cleared if the response
+	 * arrives before it expires.
 	 */
-	timeout_set(be->be_heartbeat_timeout, 15, backend_no_heartbeat, be);
+	timeout_set(be->be_heartbeat_timeout, HEARTBEAT_TIMEOUT,
+	    backend_no_heartbeat, be);
 	return;
 
 rearm:
@@ -537,7 +544,7 @@ bbal_uds_data(cconn_t *ccn, int event)
 		}
 
 		if (cbufq_pullup(q, sizeof (uint32_t)) != 0) {
-			if (errno == EIO) {
+			if (errno == ENODATA) {
 				/*
 				 * We need at least four bytes in order to read
 				 * the frame type.
@@ -569,17 +576,42 @@ bbal_uds_data(cconn_t *ccn, int event)
 		    BUNYAN_T_UINT32, "frame_type", frame_type,
 		    BUNYAN_T_END);
 
+		/*
+		 * Ensure that the first frame that arrives on a new connection
+		 * is a response to our CLIENT_HELLO frame.
+		 */
+		if (!be->be_ok && frame_type != FRAME_TYPE_SERVER_HELLO) {
+			bunyan_error(be->be_log, "errant frame before hello",
+			    BUNYAN_T_UINT32, "frame_type", frame_type,
+			    BUNYAN_T_END);
+			bbal_backend_fault(be);
+			return;
+		}
+
 		switch (frame_type) {
 		case FRAME_TYPE_SERVER_HELLO:
+			if (be->be_ok) {
+				/*
+				 * This would appear to be a duplicate hello
+				 * frame.  In case the backend is misbehaving,
+				 * terminate the connection.
+				 */
+				bunyan_error(be->be_log, "duplicate hello "
+				    "from backend", BUNYAN_T_END);
+				bbal_backend_fault(be);
+				return;
+			}
+
 			/*
 			 * SERVER_HELLO.  Just the frame type; nothing else.
 			 */
 			bunyan_info(be->be_log, "backend socket established",
 			    BUNYAN_T_END);
 			timeout_clear(be->be_connect_timeout);
-			timeout_set(be->be_heartbeat_timeout, 5,
-			    backend_send_heartbeat, be);
+			timeout_set(be->be_heartbeat_timeout,
+			    HEARTBEAT_INTERVAL, backend_send_heartbeat, be);
 			be->be_ok = B_TRUE;
+			be->be_heartbeat_outstanding = B_FALSE;
 
 			/*
 			 * Reset the reconnect delay back-off time to the
@@ -589,14 +621,23 @@ bbal_uds_data(cconn_t *ccn, int event)
 			continue;
 
 		case FRAME_TYPE_SERVER_HEARTBEAT:
+			if (!be->be_heartbeat_outstanding) {
+				bunyan_error(be->be_log, "unexpected "
+				    "heartbeat response from backend",
+				    BUNYAN_T_END);
+				bbal_backend_fault(be);
+				return;
+			}
+
 			/*
 			 * The server is responding to our periodic heartbeat
 			 * request.
 			 */
+			be->be_heartbeat_outstanding = B_FALSE;
 			bunyan_trace(be->be_log, "received heartbeat reply",
 			    BUNYAN_T_END);
-			timeout_set(be->be_heartbeat_timeout, 5,
-			    backend_send_heartbeat, be);
+			timeout_set(be->be_heartbeat_timeout,
+			    HEARTBEAT_INTERVAL, backend_send_heartbeat, be);
 			continue;
 
 		case FRAME_TYPE_OUTBOUND_UDP:
@@ -615,7 +656,7 @@ bbal_uds_data(cconn_t *ccn, int event)
 		 * frame type.
 		 */
 		if (cbufq_pullup(q, 3 * sizeof (uint32_t)) != 0) {
-			if (errno == EIO) {
+			if (errno == ENODATA) {
 				/*
 				 * Wait for the entire frame header to arrive.
 				 */
@@ -655,7 +696,7 @@ bbal_uds_data(cconn_t *ccn, int event)
 		 * it to sendto(3SOCKET).
 		 */
 		if (cbufq_pullup(q, datalen) != 0) {
-			if (errno == EIO) {
+			if (errno == ENODATA) {
 				/*
 				 * The data has not yet arrived.
 				 */
@@ -773,8 +814,13 @@ static void
 bbal_uds_error(cconn_t *ccn, int event)
 {
 	backend_t *be = cconn_data(ccn);
+	int32_t e = cconn_error_errno(ccn);
 
-	bunyan_error(be->be_log, "backend socket error", BUNYAN_T_END);
+	bunyan_error(be->be_log, "backend socket error",
+	    BUNYAN_T_STRING, "cause", cconn_error_string(ccn),
+	    BUNYAN_T_INT32, "errno", e,
+	    BUNYAN_T_STRING, "strerror", strerror(e),
+	    BUNYAN_T_END);
 	be->be_stat_conn_error++;
 
 	bbal_backend_fault(be);
@@ -793,6 +839,7 @@ bbal_uds_close(cconn_t *ccn, int event)
 	bunyan_info(be->be_log, "backend socket closed", BUNYAN_T_END);
 
 	be->be_ok = B_FALSE;
+	be->be_heartbeat_outstanding = B_FALSE;
 
 	timeout_clear(be->be_connect_timeout);
 	timeout_clear(be->be_heartbeat_timeout);
@@ -844,7 +891,8 @@ bbal_connect_uds_common(backend_t *be, cconn_t **ccnp)
 
 	bzero(&sun, sizeof (sun));
 	sun.sun_family = AF_UNIX;
-	snprintf(sun.sun_path, sizeof (sun.sun_path), "%s", be->be_path);
+	VERIFY3S(snprintf(sun.sun_path, sizeof (sun.sun_path), "%s",
+	    be->be_path), <, sizeof (sun.sun_path));
 
 	be->be_stat_conn_start++;
 
@@ -976,8 +1024,15 @@ backends_refresh()
 		 * available in the "sun_path" member of "struct sockaddr_un".
 		 */
 		char sockpath[108];
-		VERIFY3S(snprintf(sockpath, sizeof (sockpath), "%s/%s",
-		    path, de->d_name), <, sizeof (sockpath));
+		int r = snprintf(sockpath, sizeof (sockpath), "%s/%s", path,
+		    de->d_name);
+		VERIFY3S(r, >=, 0);
+		if ((size_t)r >= sizeof (sockpath)) {
+			bunyan_error(g_log, "backend socket path is too long",
+			    BUNYAN_T_STRING, "socket_path", sockpath,
+			    BUNYAN_T_END);
+			continue;
+		}
 
 		backend_t *be;
 		if ((be = backend_lookup_by_path(sockpath)) != NULL) {
@@ -988,12 +1043,12 @@ backends_refresh()
 		}
 
 		if (backend_create(g_backends_loop, sockpath, &be) != 0) {
-			bunyan_fatal(g_log, "backend_create failed",
+			bunyan_error(g_log, "backend_create failed",
 			    BUNYAN_T_STRING, "socket_path", sockpath,
 			    BUNYAN_T_INT32, "errno", (int32_t)errno,
 			    BUNYAN_T_STRING, "error", strerror(errno),
 			    BUNYAN_T_END);
-			exit(1);
+			continue;
 		}
 
 		/*

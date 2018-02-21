@@ -19,19 +19,14 @@
 #include <port.h>
 #include <sys/debug.h>
 #include <errno.h>
+#include <limits.h>
 
 #include <sys/list.h>
 
 #include <libcbuf.h>
 #include "libcloop.h"
 
-#define	LISTEN_PORT	"5757"
-
 boolean_t cserver_debug = B_FALSE;
-
-int keepidle = 1;
-int keepcnt = 15;
-int keepintvl = 1;
 
 /*
  * EVENT ORDERING:
@@ -76,6 +71,7 @@ struct cconn {
 	char *ccn_remote_addr_str;
 
 	unsigned int ccn_order;
+	size_t ccn_recvq_buffer_size;
 	size_t ccn_recvq_max;
 	cbufq_t *ccn_recvq;
 	boolean_t ccn_recvq_end;
@@ -90,6 +86,9 @@ struct cconn {
 	cconn_cb_t *ccn_on_connected;
 
 	list_node_t ccn_link;			/* cserver linkage */
+
+	const char *ccn_error_message;
+	int ccn_error_errno;
 
 	void *ccn_data;
 };
@@ -152,17 +151,38 @@ cconn_sockaddr_in(cconn_t *ccn)
 	return ((struct sockaddr_in *)&ccn->ccn_remote_addr);
 }
 
-void
-cconn_advance_state(cconn_t *ccn, cconn_state_t nstate)
+static void
+cconn_callback_enter(cconn_t *ccn)
 {
-	cconn_state_t ostate;
-
 	/*
 	 * Callbacks may themselves trigger forward state transitions.  In
 	 * order to avoid freeing the object until we are finished, we track
 	 * recursive execution.
 	 */
 	ccn->ccn_callback_depth++;
+}
+
+static void
+cconn_callback_exit(cconn_t *ccn)
+{
+	VERIFY3S(ccn->ccn_callback_depth, >, 0);
+	if (--ccn->ccn_callback_depth == 0) {
+		/*
+		 * This is the last nested callback.  If the connection has
+		 * reached the closed state, free it now.
+		 */
+		if (ccn->ccn_state == CCONN_ST_CLOSED) {
+			cconn_destroy(ccn);
+		}
+	}
+}
+
+void
+cconn_advance_state(cconn_t *ccn, cconn_state_t nstate)
+{
+	cconn_state_t ostate;
+
+	cconn_callback_enter(ccn);
 
 top:
 	if (ccn->ccn_state == CCONN_ST_CLOSED) {
@@ -269,11 +289,39 @@ top:
 	abort();
 
 release:
-	VERIFY3S(ccn->ccn_callback_depth, >, 0);
-	if (--ccn->ccn_callback_depth == 0 &&
-	    ccn->ccn_state == CCONN_ST_CLOSED) {
-		cconn_destroy(ccn);
+	cconn_callback_exit(ccn);
+}
+
+const char *
+cconn_error_string(cconn_t *ccn)
+{
+	return (ccn->ccn_error_message);
+}
+
+int
+cconn_error_errno(cconn_t *ccn)
+{
+	return (ccn->ccn_error_errno);
+}
+
+/*
+ * Record some basic detail about the error condition we hit, and then move to
+ * the error state.
+ */
+static void
+cconn_raise_error(cconn_t *ccn, const char *err_msg, int err_errno)
+{
+	if (ccn->ccn_error_message != NULL) {
+		/*
+		 * Only record the first error we hit.  A subsequent error
+		 * during teardown is regrettable, but should not mask the
+		 * original fault.
+		 */
+		ccn->ccn_error_message = err_msg;
+		ccn->ccn_error_errno = err_errno;
 	}
+
+	cconn_advance_state(ccn, CCONN_ST_ERROR);
 }
 
 /*
@@ -357,14 +405,20 @@ cconn_abort(cconn_t *ccn)
 
 	/*
 	 * Enable an immediate close of the connection by setting SO_LINGER
-	 * with a timeout of zero.  It's possible that the socket is not in a
-	 * valid state for this option to be set, so we ignore any errors.
+	 * with a timeout of zero.
 	 */
 	struct linger l;
 	l.l_onoff = 1;
 	l.l_linger = 0;
-	(void) setsockopt(cloop_ent_fd(ccn->ccn_clent), SOL_SOCKET, SO_LINGER,
-	    &l, sizeof (l));
+	if (setsockopt(cloop_ent_fd(ccn->ccn_clent), SOL_SOCKET, SO_LINGER,
+	    &l, sizeof (l)) != 0) {
+		/*
+		 * It's possible that the socket is not in a valid state for
+		 * this option to be set.  If the error is not obviously a
+		 * logic error, we'll let it slide.
+		 */
+		VERIFY(errno != EBADF && errno != ENOTSOCK && errno != EFAULT);
+	}
 
 	cconn_advance_state(ccn, CCONN_ST_CLOSED);
 	return (0);
@@ -429,32 +483,6 @@ ccn_handle_incoming_data(cconn_t *ccn, int notify)
 	}
 }
 
-void
-cconn_on_hangup(cloop_ent_t *clent, int ev)
-{
-	cconn_t *ccn = cloop_ent_data(clent);
-
-	VERIFY(ev == CLOOP_CB_HANGUP);
-
-	if (cserver_debug) {
-		fprintf(stderr, "CCONN[%p] HANGUP\n", ccn);
-	}
-	cconn_advance_state(ccn, CCONN_ST_ERROR);
-}
-
-void
-cconn_on_error(cloop_ent_t *clent, int ev)
-{
-	cconn_t *ccn = cloop_ent_data(clent);
-
-	VERIFY(ev == CLOOP_CB_ERROR);
-
-	if (cserver_debug) {
-		fprintf(stderr, "CCONN[%p] ERROR\n", ccn);
-	}
-	cconn_advance_state(ccn, CCONN_ST_ERROR);
-}
-
 static boolean_t
 ccn_sendq_finalised(cconn_t *ccn)
 {
@@ -492,7 +520,7 @@ ccn_sendq_finalised(cconn_t *ccn)
 	return (B_TRUE);
 }
 
-void
+static void
 cconn_on_write(cloop_ent_t *clent, int ev)
 {
 	cconn_t *ccn = cloop_ent_data(clent);
@@ -507,17 +535,13 @@ cconn_on_write(cloop_ent_t *clent, int ev)
 		size_t errsz = sizeof (err);
 		if (getsockopt(cloop_ent_fd(clent), SOL_SOCKET, SO_ERROR,
 		    &err, &errsz) != 0) {
-			if (cserver_debug) {
-				warn("getsockopt");
-			}
-			cconn_advance_state(ccn, CCONN_ST_ERROR);
+			cconn_raise_error(ccn, "getsockopt() for async "
+			    "connect() status", errno);
 			return;
 		}
 
 		if (err != 0) {
-			fprintf(stderr, "ASYNC SOCKET ERROR: %s",
-			    strerror(err));
-			cconn_advance_state(ccn, CCONN_ST_ERROR);
+			cconn_raise_error(ccn, "connect failed", err);
 			return;
 		}
 
@@ -570,32 +594,16 @@ retry:
 				cloop_ent_want(clent, CLOOP_CB_WRITE);
 				return;
 
-			case ECONNREFUSED:
-				if (cserver_debug) {
-					fprintf(stderr, "CCONN[%p] "
-					    "ECONNREFUSED\n", ccn);
-				}
-				cconn_advance_state(ccn, CCONN_ST_ERROR);
-				return;
-
-			case EPIPE:
-				if (cserver_debug) {
-					fprintf(stderr, "CCONN[%p] "
-					    "EPIPE\n", ccn);
-				}
-				cconn_advance_state(ccn, CCONN_ST_ERROR);
-				return;
-
-			case ECONNRESET:
-				if (cserver_debug) {
-					fprintf(stderr, "CCONN[%p] "
-					    "ECONNRESET\n", ccn);
-				}
-				cconn_advance_state(ccn, CCONN_ST_ERROR);
+			case EFAULT:
+			case EBADF:
+			case ENOTSOCK:
+				abort();
 				return;
 
 			default:
-				err(1, "cbuf_sys_send");
+				cconn_raise_error(ccn, "send() to socket",
+				    errno);
+				return;
 			}
 		}
 	}
@@ -608,7 +616,7 @@ retry:
 	}
 }
 
-void
+static void
 cconn_on_read(cloop_ent_t *clent, int ev)
 {
 	cconn_t *ccn = cloop_ent_data(clent);
@@ -624,6 +632,11 @@ cconn_on_read(cloop_ent_t *clent, int ev)
 
 	size_t av;
 	if ((av = cbufq_available(ccn->ccn_recvq)) >= ccn->ccn_recvq_max) {
+		/*
+		 * We were woken to read, but the receive queue is already
+		 * above the high water mark.  Assume this was a spurious
+		 * wakeup and go back to sleep without rearming.
+		 */
 		if (cserver_debug) {
 			fprintf(stderr, "CCONN[%p] READ TOO MUCH (%d)\n", ccn,
 			    av);
@@ -647,7 +660,7 @@ cconn_on_read(cloop_ent_t *clent, int ev)
 		 * Allocate a new buffer:
 		 */
 		new_cbuf = B_TRUE;
-		if (cbuf_alloc(&cbuf, 2048) != 0) {
+		if (cbuf_alloc(&cbuf, ccn->ccn_recvq_buffer_size) != 0) {
 			err(1, "cbuf_alloc");
 		}
 		cbuf_byteorder_set(cbuf, ccn->ccn_order);
@@ -668,13 +681,15 @@ retry:
 			cloop_ent_want(clent, CLOOP_CB_READ);
 			goto out;
 
-		case ECONNRESET:
-		case ECONNREFUSED:
-			cconn_advance_state(ccn, CCONN_ST_ERROR);
-			goto out;
+		case EFAULT:
+		case EBADF:
+		case ENOTSOCK:
+			abort();
+			return;
 
 		default:
-			err(1, "cbuf_sys_read");
+			cconn_raise_error(ccn, "read() from socket", errno);
+			goto out;
 		}
 	} else if (actual == 0) {
 		/*
@@ -709,6 +724,41 @@ out:
 		cbuf_free(cbuf);
 	} else {
 		cbuf_flip(cbuf);
+	}
+}
+
+static void
+cconn_on_other(cloop_ent_t *clent, int ev)
+{
+	cconn_t *ccn = cloop_ent_data(clent);
+
+	if (cserver_debug) {
+		fprintf(stderr, "CCONN[%p] OTHER (%d)\n", ccn, ev);
+	}
+
+	switch (ev) {
+	case CLOOP_CB_HANGUP:
+	case CLOOP_CB_ERROR:
+		/*
+		 * The POLLERR and POLLHUP events aren't particularly useful
+		 * on their own, at least for AF_UNIX and probably TCP sockets.
+		 * We use these events to trigger a read and a write from the
+		 * descriptor, in order to try and catch any material errors.
+		 * If the connection is already closed, don't run any more
+		 * callbacks.
+		 */
+		cconn_callback_enter(ccn);
+		if (ccn->ccn_state != CCONN_ST_CLOSED) {
+			cconn_on_read(clent, CLOOP_CB_READ);
+		}
+		if (ccn->ccn_state != CCONN_ST_CLOSED) {
+			cconn_on_write(clent, CLOOP_CB_WRITE);
+		}
+		cconn_callback_exit(ccn);
+		return;
+
+	default:
+		abort();
 	}
 }
 
@@ -758,10 +808,10 @@ cconn_alloc(cconn_t **ccnp)
 	/*
 	 * Install the appropriate cloop entity event callbacks.
 	 */
-	cloop_ent_on(ccn->ccn_clent, CLOOP_CB_HANGUP, cconn_on_hangup);
+	cloop_ent_on(ccn->ccn_clent, CLOOP_CB_HANGUP, cconn_on_other);
 	cloop_ent_on(ccn->ccn_clent, CLOOP_CB_READ, cconn_on_read);
 	cloop_ent_on(ccn->ccn_clent, CLOOP_CB_WRITE, cconn_on_write);
-	cloop_ent_on(ccn->ccn_clent, CLOOP_CB_ERROR, cconn_on_error);
+	cloop_ent_on(ccn->ccn_clent, CLOOP_CB_ERROR, cconn_on_other);
 
 	/*
 	 * Set the connection to the pre-connection state:
@@ -773,6 +823,14 @@ cconn_alloc(cconn_t **ccnp)
 	 */
 	ccn->ccn_recvq_max = 8 * 1024;
 
+	/*
+	 * XXX Set default buffer size to 2KB.
+	 */
+	ccn->ccn_recvq_buffer_size = 2 * 1024;
+
+	/*
+	 * Use "network" byte order by default.
+	 */
 	ccn->ccn_order = CBUF_ORDER_BIG_ENDIAN;
 
 	*ccnp = ccn;
@@ -803,6 +861,12 @@ cconn_attach(cloop_t *cloop, cconn_t *ccn, int sock)
 	cloop_attach_ent(cloop, ccn->ccn_clent, sock);
 
 	cconn_advance_state(ccn, CCONN_ST_WAITING_FOR_CONNECT);
+}
+
+static int
+cserver_setsockopt_int(int s, int level, int optname, int optval)
+{
+	return (setsockopt(s, level, optname, &optval, sizeof (optval)));
 }
 
 int
@@ -842,23 +906,27 @@ retry:
 	}
 
 	/*
-	 * Set socket options.
+	 * Enable keep-alive probes for this socket, such that if the remote
+	 * peer goes away we will eventually notice.
 	 */
-	int opt_on = 1;
-	if (setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &opt_on,
-	    sizeof (opt_on)) != 0) {
+	if (cserver_setsockopt_int(fd, SOL_SOCKET, SO_KEEPALIVE, 1) != 0) {
 		e = errno;
 		if (cserver_debug) {
 			warn("could not set SO_KEEPALIVE");
 		}
 		goto fail;
 	}
-	(void) setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &keepidle,
-	    sizeof (keepidle));
-	(void) setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &keepcnt,
-	    sizeof (keepcnt));
-	(void) setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &keepintvl,
-	    sizeof (keepintvl));
+
+	/*
+	 * Further tune the keep-alive mechanism to be more responsive.  The
+	 * IDLE and INTVL interval (in seconds) specify how long to wait before
+	 * sending the first and subsequent probes, respectively.  The CNT is
+	 * the number of failed probes before we will abort the connection.
+	 * See tcp(7P) for more information.
+	 */
+	(void) cserver_setsockopt_int(fd, IPPROTO_TCP, TCP_KEEPIDLE, 1);
+	(void) cserver_setsockopt_int(fd, IPPROTO_TCP, TCP_KEEPCNT, 15);
+	(void) cserver_setsockopt_int(fd, IPPROTO_TCP, TCP_KEEPINTVL, 1);
 
 	/*
 	 * We want to be notified when there are more incoming connections.
@@ -870,11 +938,6 @@ retry:
 	 */
 	ccn->ccn_server = csrv;
 	list_insert_tail(&csrv->csrv_connections, ccn);
-
-	/*
-	 * XXX Set default recvq size of 8KB.
-	 */
-	ccn->ccn_recvq_max = 8 * 1024;
 
 	/*
 	 * Attach our cloop entity to the event loop:
@@ -1059,13 +1122,57 @@ cserver_alloc(cserver_t **csrvp)
 }
 
 static int
+cserver_parse_long(const char *input, long *output, int base)
+{
+	char *endp;
+	long ret;
+
+	errno = 0;
+	ret = strtol(input, &endp, base);
+
+	if (ret == 0 && errno == EINVAL) {
+		return (-1);
+	} else if ((ret == LONG_MAX || ret == LONG_MIN) && errno == ERANGE) {
+		return (-1);
+	}
+
+	/*
+	 * Any other error would appear to be a programmer error.
+	 */
+	VERIFY3S(errno, ==, 0);
+
+	if (*endp != '\0') {
+		/*
+		 * The string contained trailing detritus after the numeric
+		 * portion.
+		 */
+		errno = EINVAL;
+		return (-1);
+	}
+
+	*output = ret;
+	return (0);
+}
+
+
+int
 cserver_parse_ipv4addr(const char *ipaddr, const char *port,
     struct sockaddr_in *addr)
 {
-	bzero(addr, sizeof (*addr));
+	long portn;
 
+	if (cserver_parse_long(port, &portn, 10) != 0 ||
+	    portn < 1 || portn > 65535) {
+		if (cserver_debug) {
+			warnx("invalid port %s", port);
+		}
+		errno = EPROTO;
+		return (-1);
+	}
+
+	bzero(addr, sizeof (*addr));
 	addr->sin_family = AF_INET;
-	addr->sin_port = htons(atoi(port));
+	addr->sin_port = htons((in_port_t)portn);
 
 	switch (inet_pton(AF_INET, ipaddr, &addr->sin_addr)) {
 	case 1:
@@ -1086,7 +1193,7 @@ cserver_parse_ipv4addr(const char *ipaddr, const char *port,
 
 int
 cserver_listen_tcp(cserver_t *csrv, cloop_t *cloop, const char *ipaddr,
-    const char *port)
+    const char *port, int backlog)
 {
 	int e;
 	int sock = -1;
@@ -1151,7 +1258,7 @@ cserver_listen_tcp(cserver_t *csrv, cloop_t *cloop, const char *ipaddr,
 	/*
 	 * Listen.
 	 */
-	if (listen(sock, 1000) != 0) {
+	if (listen(sock, backlog) != 0) {
 		e = errno;
 		if (cserver_debug) {
 			warn("listen failed");

@@ -66,13 +66,16 @@ typedef void cserver_cb_t(cserver_t *, int);
 extern int cserver_alloc(cserver_t **csrvp);
 extern void cserver_free(cserver_t *csrv);
 
+extern int cserver_parse_ipv4addr(const char *, const char *,
+    struct sockaddr_in *);
+
 /*
  * Close the listen socket so as to stop accepting incoming connections.
  */
 extern void cserver_close(cserver_t *);
 
 extern int cserver_listen_tcp(cserver_t *, cloop_t *, const char *ipaddr,
-    const char *port);
+    const char *port, int backlog);
 
 extern void cserver_destroy(cserver_t *);
 extern void cserver_abort(cserver_t *);
@@ -105,6 +108,11 @@ extern int cconn_abort(cconn_t *ccn);
 
 extern void *cconn_data(cconn_t *ccn);
 extern void cconn_data_set(cconn_t *ccn, void *data);
+
+extern const char *cconn_error_string(cconn_t *ccn);
+extern int cconn_error_errno(cconn_t *ccn);
+
+
 
 extern const struct sockaddr_in *cconn_sockaddr_in(cconn_t *ccn);
 extern const char *cconn_remote_addr_str(cconn_t *ccn);

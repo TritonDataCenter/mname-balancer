@@ -37,28 +37,41 @@
 #ifndef	_BBAL_H
 #define	_BBAL_H
 
-#define	MIN_RECONNECT_DELAY_SECS	1
-#define	MAX_RECONNECT_DELAY_SECS	32
+#define	_UNUSED	__attribute__((unused))
+#define	_INLINE	inline __attribute__((always_inline))
 
-static int __attribute__((__unused__))
+/*
+ * These base functions are used in the various subsystems to construct more
+ * specific AVL comparators.  See also: avl_create(3AVL).
+ */
+static _INLINE int _UNUSED
 compare_u32(uint32_t first, uint32_t second)
 {
 	return (first < second ? -1 : first > second ? 1 : 0);
 }
 
-static int __attribute__((__unused__))
+static _INLINE int _UNUSED
 compare_hrtime(hrtime_t first, hrtime_t second)
 {
 	return (first < second ? -1 : first > second ? 1 : 0);
 }
 
-static int __attribute__((__unused__))
+static _INLINE int _UNUSED
 compare_str(const char *first, const char *second)
 {
 	int ret = strcmp(first, second);
 
 	return (ret > 0 ? 1 : ret < 0 ? -1 : 0);
 }
+
+/*
+ * When reconnecting to faulted backends, we back off for each subsequent
+ * failure.  The delay starts at 1 second and grows to a maximum of 32.
+ * Increasing this any further could mean a protracted delay in returning a
+ * newly healthy backend to service.
+ */
+#define	MIN_RECONNECT_DELAY_SECS	1
+#define	MAX_RECONNECT_DELAY_SECS	32
 
 /*
  * Frame type numbers for use in the backend protocol.  See comments in
@@ -81,7 +94,7 @@ typedef struct bbal_timeout timeout_t;
 
 typedef void timeout_func_t(timeout_t *, void *);
 
-typedef struct bbal_timeout {
+struct bbal_timeout {
 	avl_node_t to_node;
 	uint32_t to_id;
 	hrtime_t to_scheduled_at;
@@ -90,7 +103,7 @@ typedef struct bbal_timeout {
 	timeout_func_t *to_func;
 	void *to_arg;
 	boolean_t to_active;
-} timeout_t;
+};
 
 typedef struct {
 	avl_node_t be_node;
@@ -104,6 +117,7 @@ typedef struct {
 
 	boolean_t be_ok;
 	boolean_t be_reconnect;
+	boolean_t be_heartbeat_outstanding;
 	uint32_t be_remotes;
 
 	timeout_t *be_connect_timeout;
@@ -111,8 +125,6 @@ typedef struct {
 
 	timeout_t *be_reconnect_timeout;
 	unsigned be_reconnect_delay;
-
-	cbufq_t *be_input;
 
 	bunyan_logger_t *be_log;
 
@@ -168,6 +180,6 @@ extern void remotes_expire(void);
 extern void remotes_rebalance(uint32_t, uint32_t);
 extern int remotes_init(void);
 
-#define	SECONDS_IN_NS(s)	(s * 1000000000LL)
+#define	SECONDS_IN_NS(s)	(s * NANOSEC)
 
 #endif	/* _BBAL_H_ */

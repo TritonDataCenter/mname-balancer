@@ -27,6 +27,12 @@
 
 #include "bbal.h"
 
+/*
+ * It's not really clear that there's a universally excellent value for listen
+ * backlog, so we'll simply try not to set it too small to be useful.
+ */
+#define	BBAL_TCP_BACKLOG	1000
+
 uint32_t g_tcp_conn_count = 0;
 
 /*
@@ -193,7 +199,7 @@ bbal_tcp_back_data(cconn_t *ccn, int event)
 		 * TCP connection before sending data.
 		 */
 		if (cbufq_pullup(q, sizeof (uint32_t)) != 0) {
-			if (errno == EIO) {
+			if (errno == ENODATA) {
 				/*
 				 * Wait for the entire frame type value.
 				 */
@@ -291,10 +297,14 @@ static void
 bbal_tcp_error(cconn_t *ccn, int event)
 {
 	proxy_t *prx = cconn_data(ccn);
+	int32_t e = cconn_error_errno(ccn);
 
 	bunyan_error(prx->prx_log, "TCP error",
 	    BUNYAN_T_STRING, "which", ccn == prx->prx_front ? "front" :
 	    "back",
+	    BUNYAN_T_STRING, "cause", cconn_error_string(ccn),
+	    BUNYAN_T_INT32, "errno", e,
+	    BUNYAN_T_STRING, "strerror", strerror(e),
 	    BUNYAN_T_END);
 
 	bbal_tcp_teardown(prx);
@@ -490,7 +500,8 @@ bbal_tcp_listen(cserver_t *tcp, cloop_t *loop, const char *listen_ip,
     const char *listen_port)
 {
 	cserver_on(tcp, CSERVER_CB_INCOMING, bbal_tcp_incoming);
-	if (cserver_listen_tcp(tcp, loop, listen_ip, listen_port) != 0) {
+	if (cserver_listen_tcp(tcp, loop, listen_ip, listen_port,
+	    BBAL_TCP_BACKLOG) != 0) {
 		bunyan_fatal(g_log, "failed to create TCP listen socket",
 		    BUNYAN_T_STRING, "address", listen_ip,
 		    BUNYAN_T_STRING, "port", listen_port,

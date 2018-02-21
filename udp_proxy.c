@@ -26,34 +26,6 @@
 
 #include "bbal.h"
 
-static int
-bbal_parse_ipv4addr(const char *ipaddr, const char *port,
-    struct sockaddr_in *addr)
-{
-	bzero(addr, sizeof (*addr));
-
-	addr->sin_family = AF_INET;
-	addr->sin_port = htons(atoi(port));
-
-	switch (inet_pton(AF_INET, ipaddr, &addr->sin_addr)) {
-	case 1:
-		return (0);
-
-	case 0:
-		bunyan_warn(g_log, "invalid IP address",
-		    BUNYAN_T_STRING, "address", ipaddr,
-		    BUNYAN_T_END);
-		errno = EPROTO;
-		return (-1);
-
-	default:
-		bunyan_warn(g_log, "failed to parse IP address",
-		    BUNYAN_T_STRING, "address", ipaddr,
-		    BUNYAN_T_END);
-		return (-1);
-	}
-}
-
 int
 bbal_udp_listen(const char *ipaddr, const char *port, int *sockp)
 {
@@ -67,9 +39,13 @@ bbal_udp_listen(const char *ipaddr, const char *port, int *sockp)
 	    BUNYAN_T_STRING, "port", port,
 	    BUNYAN_T_END);
 
-	if (bbal_parse_ipv4addr(ipaddr != NULL ? ipaddr : "0.0.0.0", port,
+	if (cserver_parse_ipv4addr(ipaddr != NULL ? ipaddr : "0.0.0.0", port,
 	    &addr) != 0) {
 		e = errno;
+		bunyan_warn(g_log, "failed to parse IP address or port",
+		    BUNYAN_T_STRING, "address", ipaddr,
+		    BUNYAN_T_STRING, "port", port,
+		    BUNYAN_T_END);
 		goto fail;
 	}
 
