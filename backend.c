@@ -274,6 +274,7 @@ backend_create(cloop_t *loop, const char *path, backend_t **bep)
 	be->be_ok = B_FALSE;
 	be->be_heartbeat_outstanding = B_FALSE;
 	be->be_reconnect = B_FALSE;
+	be->be_removed = B_FALSE;
 
 	const char *bn = strrchr(path, '/');
 	if (bn != NULL) {
@@ -353,6 +354,20 @@ bbal_backend_reconnect_cb(timeout_t *to, void *arg)
 	bunyan_info(be->be_log, "connecting to backend", BUNYAN_T_END);
 
 	if (bbal_connect_uds(be) != 0) {
+		if (errno == ENOENT) {
+			/*
+			 * The socket has been removed.  Mark it as removed
+			 * for now, and stop reconnecting.  The refresh
+			 * routine will reactivate the backend if the socket
+			 * appears again.
+			 */
+			be->be_removed = B_TRUE;
+			be->be_reconnect = B_FALSE;
+			bunyan_info(be->be_log, "backend socket removed",
+			    BUNYAN_T_END);
+			return;
+		}
+
 		bunyan_error(be->be_log, "failed to connect",
 		    BUNYAN_T_INT32, "errno", (int32_t)errno,
 		    BUNYAN_T_STRING, "strerror", strerror(errno),
@@ -1039,6 +1054,18 @@ backends_refresh()
 			/*
 			 * There is already a backend for this path.
 			 */
+			if (be->be_removed) {
+				/*
+				 * We've seen this backend before, but the
+				 * socket was removed from the directory at
+				 * some stage.  As it has reappeared, attempt
+				 * to reconnect.
+				 */
+				be->be_removed = B_FALSE;
+				bunyan_info(be->be_log, "backend socket "
+				    "returned (connecting)", BUNYAN_T_END);
+				goto connect;
+			}
 			continue;
 		}
 
@@ -1051,6 +1078,7 @@ backends_refresh()
 			continue;
 		}
 
+connect:
 		/*
 		 * For newly discovered backends, we want to trigger an
 		 * immediate connection attempt.

@@ -156,6 +156,15 @@ top:
 		goto top;
 	}
 
+	if (be->be_removed) {
+		/*
+		 * The socket for our primary backend has been removed from
+		 * the file system.  Reset everything.
+		 */
+		remote_backend_reset(rem, REMBE_BOTH);
+		goto top;
+	}
+
 	if (be->be_ok) {
 		/*
 		 * Our primary backend is online.

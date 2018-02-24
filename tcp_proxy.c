@@ -55,7 +55,9 @@ typedef struct {
 static void
 bbal_tcp_teardown(proxy_t *prx)
 {
-	bunyan_debug(prx->prx_log, "TCP teardown", BUNYAN_T_END);
+	if (prx->prx_log != NULL) {
+		bunyan_debug(prx->prx_log, "TCP teardown", BUNYAN_T_END);
+	}
 
 	if (prx->prx_front == NULL && prx->prx_back == NULL) {
 		/*

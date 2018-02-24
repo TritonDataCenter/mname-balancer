@@ -118,6 +118,7 @@ typedef struct {
 	boolean_t be_ok;
 	boolean_t be_reconnect;
 	boolean_t be_heartbeat_outstanding;
+	boolean_t be_removed;
 	uint32_t be_remotes;
 
 	timeout_t *be_connect_timeout;
