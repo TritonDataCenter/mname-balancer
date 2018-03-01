@@ -42,7 +42,7 @@ CFLAGS =	-Wall -Wextra -Werror \
 		-fno-inline-small-functions \
 		$(INCS:%=-I%)
 
-OBJ_DIR =	obj
+OBJ_DIR =	$(TOP)/obj
 
 CTFCONVERT =	/opt/ctf/bin/ctfconvert
 CC =		gcc
@@ -56,23 +56,23 @@ $(PROG): $(OBJS:%=$(OBJ_DIR)/%) $(DEPS_LIBS:%=$(OBJ_DIR)/%)
 $(OBJ_DIR):
 	mkdir -p $@
 
-$(OBJ_DIR)/%.o: %.c $(HEADERS) | $(OBJ_DIR)
+$(OBJ_DIR)/%.o: %.c $(HEADERS) | deps/libcbuf/.git $(OBJ_DIR)
 	$(CC) -c $(CFLAGS) -o $@ $<
 
 $(OBJ_DIR)/%.o: deps/libcloop/src/%.c | $(OBJ_DIR)
 	$(CC) -c $(CFLAGS) -o $@ $<
 
 $(OBJ_DIR)/illumos_list.a: | deps/illumos-list/.git $(OBJ_DIR)
-	cd deps/illumos-list && $(MAKE) BUILD_DIR=$(TOP)/$(OBJ_DIR) \
+	cd deps/illumos-list && $(MAKE) BUILD_DIR=$(OBJ_DIR) \
 	    EXTRA_CFLAGS=-pthread
 
 $(OBJ_DIR)/illumos_bunyan.a: | deps/illumos-bunyan/.git $(OBJ_DIR)
-	cd deps/illumos-bunyan && $(MAKE) BUILD_DIR=$(TOP)/$(OBJ_DIR) \
+	cd deps/illumos-bunyan && $(MAKE) BUILD_DIR=$(OBJ_DIR) \
 	    EXTRA_CFLAGS=-pthread
 
 $(OBJ_DIR)/libcbuf.a: | deps/libcbuf/.git $(OBJ_DIR)
-	cd deps/libcbuf && $(MAKE) OBJ_DIR=$(TOP)/$(OBJ_DIR) \
-	    DESTDIR=$(TOP)/$(OBJ_DIR) EXTRA_CFLAGS=-pthread
+	cd deps/libcbuf && $(MAKE) OBJ_DIR=$(OBJ_DIR) \
+	    DESTDIR=$(OBJ_DIR) EXTRA_CFLAGS=-pthread
 
 deps/%/.git:
 	$(GIT) submodule update --init --recursive
