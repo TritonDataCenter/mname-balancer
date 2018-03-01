@@ -1106,6 +1106,7 @@ backends_rebalance(void)
 	int32_t max_count = -1;
 	uint32_t max_backend_id = 0;
 	int32_t min_count = -1;
+	uint32_t nbe = 0;
 
 	for (backend_t *be = avl_first(&g_backends); be != NULL;
 	    be = AVL_NEXT(&g_backends, be)) {
@@ -1116,6 +1117,8 @@ backends_rebalance(void)
 			 */
 			continue;
 		}
+
+		nbe++;
 
 		if (max_count == -1 || be->be_remotes > (uint32_t)max_count) {
 			max_backend_id = be->be_id;
@@ -1144,7 +1147,6 @@ backends_rebalance(void)
 		return;
 	}
 
-	ulong_t nbe = avl_numnodes(&g_backends);
 	if (spread > nbe) {
 		remotes_rebalance(max_backend_id, spread - nbe);
 	}

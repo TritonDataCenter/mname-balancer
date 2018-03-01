@@ -326,7 +326,7 @@ remotes_rebalance(uint32_t backend_id, uint32_t count)
 			VERIFY3S(count, >, 0);
 			count--;
 
-			bunyan_trace(rem->rem_log, "rebalancing to reduce "
+			bunyan_info(rem->rem_log, "rebalancing to reduce "
 			    "spread", BUNYAN_T_END);
 			remote_backend_reset(rem, REMBE_BOTH);
 		}
