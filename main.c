@@ -86,7 +86,7 @@ main(int argc, char *argv[])
 	cserver_t *tcp = NULL;
 	const char *listen_ip = "0.0.0.0";
 	const char *listen_port = "53";
-	const char *backends_path;
+	const char *backends_path = NULL;
 	int level = BUNYAN_L_INFO;
 
 	int c;
