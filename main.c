@@ -181,7 +181,7 @@ main(int argc, char *argv[])
 		{ .tde_func = run_timer_backends,	.tde_interval = 5 },
 		{ .tde_func = run_timer_rebalance,	.tde_interval = 15 },
 		{ .tde_func = run_timer_expire_remotes,	.tde_interval = 30 },
-		{ NULL }
+		{ .tde_func = NULL,			.tde_interval = 0 }
 	};
 	for (unsigned i = 0; timer_defs[i].tde_func != NULL; i++) {
 		if (cloop_ent_alloc(&timer_defs[i].tde_ent) != 0 ||
