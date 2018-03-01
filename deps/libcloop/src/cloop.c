@@ -338,11 +338,11 @@ cloop_attach_ent_timer(cloop_t *cloop, cloop_ent_t *clent, int interval)
 	VERIFY3S(clent->clent_type, ==, CLOOP_ENT_TYPE_NONE);
 	VERIFY(!list_link_active(&clent->clent_link));
 
-	port_notify_t pn = { 0 };
-	pn.portnfy_port = cloop->cloop_port;
-	pn.portnfy_user = clent;
+	port_notify_t pn = { .portnfy_port = cloop->cloop_port,
+	    .portnfy_user = clent };
 
-	struct sigevent sigev = { 0 };
+	struct sigevent sigev;
+	bzero(&sigev, sizeof (sigev));
 	sigev.sigev_notify = SIGEV_PORT;
 	sigev.sigev_value.sival_ptr = &pn;
 
@@ -371,8 +371,9 @@ cloop_attach_ent_timer(cloop_t *cloop, cloop_ent_t *clent, int interval)
 		return (-1);
 	}
 
-	struct itimerspec itsp = { { 0 }, { 0 } };
+	struct itimerspec itsp;
 ok:
+	bzero(&itsp, sizeof (itsp));
 	itsp.it_interval.tv_sec = interval;
 	itsp.it_value = itsp.it_interval;
 	if (timer_settime(timer, 0, &itsp, NULL) != 0) {
