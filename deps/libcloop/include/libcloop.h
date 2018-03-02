@@ -61,6 +61,8 @@ extern int cloop_attach_ent_timer(cloop_t *cloop, cloop_ent_t *clent, int interv
 
 extern int cloop_ent_fd(cloop_ent_t *clent);
 
+extern int cserver_signal_setup(void);
+
 typedef void cserver_cb_t(cserver_t *, int);
 
 extern int cserver_alloc(cserver_t **csrvp);

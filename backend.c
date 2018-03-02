@@ -115,6 +115,16 @@
 
 #include "bbal.h"
 
+#ifdef	MSG_NOSIGNAL
+#define	BE_MSG_NOSIGNAL			MSG_NOSIGNAL
+#else
+/*
+ * In the case that there is no MSG_NOSIGNAL support on this system, SIGPIPE
+ * will be ignored by "cserver_signal_setup()".
+ */
+#define	BE_MSG_NOSIGNAL			0
+#endif
+
 /*
  * When a backend connection is established, we will send a periodic heartbeat
  * request to ensure the session is responsive.  If a response does not arrive
@@ -743,7 +753,8 @@ bbal_uds_data(cconn_t *ccn, int event)
 		size_t actual;
 again:
 		if (cbuf_sys_sendto(cbuf, g_sock, datalen, &actual,
-		    MSG_NOSIGNAL, (struct sockaddr *)&sin, sizeof (sin)) != 0) {
+		    BE_MSG_NOSIGNAL, (struct sockaddr *)&sin,
+		    sizeof (sin)) != 0) {
 			if (errno == EINTR) {
 				goto again;
 			}

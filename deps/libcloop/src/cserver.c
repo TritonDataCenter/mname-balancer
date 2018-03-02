@@ -26,6 +26,16 @@
 #include <libcbuf.h>
 #include "libcloop.h"
 
+#ifdef	MSG_NOSIGNAL
+#define	CSERVER_MSG_NOSIGNAL	MSG_NOSIGNAL
+#else
+/*
+ * See the comment in "cserver_signal_setup()" that describes the workaround
+ * for a missing MSG_NOSIGNAL.
+ */
+#define	CSERVER_MSG_NOSIGNAL	0
+#endif
+
 boolean_t cserver_debug = B_FALSE;
 
 /*
@@ -585,7 +595,7 @@ cconn_on_write(cloop_ent_t *clent, int ev)
 
 retry:
 		if (cbuf_sys_send(head, cloop_ent_fd(clent),
-		    CBUF_SYSREAD_ENTIRE, &actual, MSG_NOSIGNAL) != 0) {
+		    CBUF_SYSREAD_ENTIRE, &actual, CSERVER_MSG_NOSIGNAL) != 0) {
 			switch (errno) {
 			case EINTR:
 				goto retry;
@@ -861,6 +871,34 @@ cconn_attach(cloop_t *cloop, cconn_t *ccn, int sock)
 	cloop_attach_ent(cloop, ccn->ccn_clent, sock);
 
 	cconn_advance_state(ccn, CCONN_ST_WAITING_FOR_CONNECT);
+}
+
+int
+cserver_signal_setup(void)
+{
+#ifndef	MSG_NOSIGNAL
+	/*
+	 * Writing to a SOCK_STREAM socket that has been shut down for writing
+	 * will result not only in the desired EPIPE error, but an entirely
+	 * unhelpful thread-directed SIGPIPE signal.  Prior to the introduction
+	 * of the MSG_NOSIGNAL option for send(3SOCKET), etc, the only way to
+	 * avoid this signal is to ignore it completely.
+	 *
+	 * In order to avoid silently inflicting this regrettable porcine face
+	 * paint on every consumer, we provide this entry point to make the
+	 * change if it is required for this system.
+	 */
+	struct sigaction sa;
+	sa.sa_handler = SIG_IGN;
+	sa.sa_flags = 0;
+	VERIFY0(sigemptyset(&sa.sa_mask));
+
+	if (sigaction(SIGPIPE, &sa, NULL) != 0) {
+		return (-1);
+	}
+#endif
+
+	return (0);
 }
 
 static int

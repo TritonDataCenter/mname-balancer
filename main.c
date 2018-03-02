@@ -148,6 +148,10 @@ main(int argc, char *argv[])
 
 	(void) bunyan_info(g_log, "starting up", BUNYAN_T_END);
 
+	if (cserver_signal_setup() != 0) {
+		err(1, "cserver_signal_setup");
+	}
+
 	if (cloop_alloc(&loop) != 0 || cloop_ent_alloc(&udp) != 0 ||
 	    cserver_alloc(&tcp) != 0) {
 		bunyan_fatal(g_log, "cloop init failure",
