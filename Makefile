@@ -42,11 +42,23 @@ CFLAGS =	-Wall -Wextra -Werror \
 		-fno-inline-small-functions \
 		$(INCS:%=-I%)
 
+DEPS_CFLAGS +=	-pthread
+
 OBJ_DIR =	$(TOP)/obj
 
 CTFCONVERT =	/opt/ctf/bin/ctfconvert
 CC =		gcc
 GIT =		git
+
+#
+# Regrettably, we need to be able to build this software on systems prior to
+# the introduction of the endian(3C) suite of functions.  This check is truly
+# awful, and if this software is to be cross-compiled (e.g., using --sysroot)
+# it will absolutely need to be changed.
+#
+ifeq (,$(wildcard /usr/include/endian.h))
+DEPS_CFLAGS +=	-DLIBCBUF_NO_ENDIAN_H
+endif
 
 $(PROG): $(OBJS:%=$(OBJ_DIR)/%) $(DEPS_LIBS:%=$(OBJ_DIR)/%)
 	$(CC) $(CFLAGS) -o $@ $(OBJS:%=$(OBJ_DIR)/%) \
@@ -64,15 +76,15 @@ $(OBJ_DIR)/%.o: deps/libcloop/src/%.c | $(OBJ_DIR)
 
 $(OBJ_DIR)/illumos_list.a: | deps/illumos-list/.git $(OBJ_DIR)
 	cd deps/illumos-list && $(MAKE) BUILD_DIR=$(OBJ_DIR) \
-	    EXTRA_CFLAGS=-pthread
+	    EXTRA_CFLAGS='$(DEPS_CFLAGS)'
 
 $(OBJ_DIR)/illumos_bunyan.a: | deps/illumos-bunyan/.git $(OBJ_DIR)
 	cd deps/illumos-bunyan && $(MAKE) BUILD_DIR=$(OBJ_DIR) \
-	    EXTRA_CFLAGS=-pthread
+	    EXTRA_CFLAGS='$(DEPS_CFLAGS)'
 
 $(OBJ_DIR)/libcbuf.a: | deps/libcbuf/.git $(OBJ_DIR)
 	cd deps/libcbuf && $(MAKE) OBJ_DIR=$(OBJ_DIR) \
-	    DESTDIR=$(OBJ_DIR) EXTRA_CFLAGS=-pthread
+	    DESTDIR=$(OBJ_DIR) EXTRA_CFLAGS='$(DEPS_CFLAGS)'
 
 deps/%/.git:
 	$(GIT) submodule update --init --recursive
