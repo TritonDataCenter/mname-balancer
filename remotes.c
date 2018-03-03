@@ -293,10 +293,10 @@ remotes_expire(void)
 		rem_next = AVL_NEXT(&g_remotes, rem);
 
 		/*
-		 * If we have not heard from a particular host in two minutes,
+		 * If we have not heard from a particular host in five minutes,
 		 * expire its remote entry.
 		 */
-		if (age > SECONDS_IN_NS(120)) {
+		if (age > SECONDS_IN_NS(5 * 60)) {
 			bunyan_info(rem->rem_log, "expiring remote entry",
 			    BUNYAN_T_END);
 			remote_destroy(rem);
