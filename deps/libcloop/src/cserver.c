@@ -403,10 +403,19 @@ int
 cconn_abort(cconn_t *ccn)
 {
 	switch (ccn->ccn_state) {
+	case CCONN_ST_WAITING_FOR_CONNECT:
 	case CCONN_ST_DATA_AVAILABLE:
 	case CCONN_ST_WAITING_FOR_DATA:
 	case CCONN_ST_READ_EOF:
 		break;
+
+	case CCONN_ST_ERROR:
+	case CCONN_ST_CLOSED:
+		/*
+		 * In the ERROR or CLOSED state, no further action is required
+		 * to ensure that this connection is torn down completely.
+		 */
+		return (0);
 
 	default:
 		errno = EINVAL;
@@ -512,10 +521,7 @@ ccn_sendq_finalised(cconn_t *ccn)
 		fprintf(stderr, "CCONN[%p] SHUTDOWN WRITES\n", ccn);
 	}
 	if (shutdown(cloop_ent_fd(ccn->ccn_clent), SHUT_WR) != 0) {
-		if (cserver_debug) {
-			warn("shutdown(SHUT_WR)");
-		}
-		cconn_advance_state(ccn, CCONN_ST_ERROR);
+		cconn_raise_error(ccn, "shutdown(SHUT_WR)", errno);
 		return (B_TRUE);
 	}
 	ccn->ccn_sendq_flushed = B_TRUE;
