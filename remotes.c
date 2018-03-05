@@ -42,7 +42,8 @@ remotes_compar(const void *first, const void *second)
 	const remote_t *rf = first;
 	const remote_t *rs = second;
 
-	return (compare_u32(rf->rem_addr.s_addr, rs->rem_addr.s_addr));
+	return (compare_u32(ntohl(rf->rem_addr.s_addr),
+	    ntohl(rs->rem_addr.s_addr)));
 }
 
 typedef enum {
