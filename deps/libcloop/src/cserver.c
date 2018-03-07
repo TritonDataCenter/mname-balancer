@@ -364,6 +364,7 @@ cconn_recvq(cconn_t *ccn)
 	switch (ccn->ccn_state) {
 	case CCONN_ST_DATA_AVAILABLE:
 	case CCONN_ST_WAITING_FOR_DATA:
+	case CCONN_ST_READ_EOF:
 		break;
 
 	default:

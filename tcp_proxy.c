@@ -46,6 +46,7 @@ typedef struct {
 	cconn_t *prx_front;
 	cconn_t *prx_back;
 	boolean_t prx_flowing;
+	boolean_t prx_front_eof;
 	timeout_t *prx_connect_timeout;
 } proxy_t;
 
@@ -130,6 +131,26 @@ bbal_tcp_front_data(cconn_t *ccn, int event)
 	}
 
 	cconn_more_data(prx->prx_front);
+}
+
+static void
+bbal_tcp_front_end(cconn_t *ccn, int event)
+{
+	proxy_t *prx = cconn_data(ccn);
+
+	bunyan_trace(prx->prx_log, "TCP stream EOF",
+	    BUNYAN_T_STRING, "which", "front",
+	    BUNYAN_T_END);
+
+	prx->prx_front_eof = B_TRUE;
+
+	if (prx->prx_flowing) {
+		if (prx->prx_back != NULL && cconn_fin(prx->prx_back) != 0) {
+			bunyan_error(prx->prx_log, "FIN send failed",
+			    BUNYAN_T_STRING, "which", "back",
+			    BUNYAN_T_END);
+		}
+	}
 }
 
 /*
@@ -239,6 +260,9 @@ bbal_tcp_back_data(cconn_t *ccn, int event)
 		 */
 		prx->prx_flowing = B_TRUE;
 		bbal_tcp_front_data(prx->prx_front, CCONN_CB_DATA_AVAILABLE);
+		if (prx->prx_front_eof) {
+			bbal_tcp_front_end(prx->prx_front, CCONN_CB_END);
+		}
 	}
 
 	/*
@@ -271,23 +295,19 @@ done:
 	cconn_more_data(prx->prx_back);
 }
 
-/*
- * Called when either the frontend or backend connection has finished sending
- * data.  The stream EOF is propagated to the other connection.
- */
 static void
-bbal_tcp_end(cconn_t *ccn, int event)
+bbal_tcp_back_end(cconn_t *ccn, int event)
 {
 	proxy_t *prx = cconn_data(ccn);
-	cconn_t *other = ccn == prx->prx_front ? prx->prx_back : prx->prx_front;
 
 	bunyan_trace(prx->prx_log, "TCP stream EOF",
-	    BUNYAN_T_STRING, "which", ccn == prx->prx_front ? "front" :
-	    "back",
+	    BUNYAN_T_STRING, "which", "back",
 	    BUNYAN_T_END);
 
-	if (other != NULL && cconn_fin(other) != 0) {
-		bunyan_error(prx->prx_log, "FIN send failed", BUNYAN_T_END);
+	if (prx->prx_front != NULL && cconn_fin(prx->prx_front) != 0) {
+		bunyan_error(prx->prx_log, "FIN send failed",
+		    BUNYAN_T_STRING, "which", "front",
+		    BUNYAN_T_END);
 	}
 }
 
@@ -474,14 +494,14 @@ bbal_tcp_incoming(cserver_t *cserver, int event)
 
 	cconn_data_set(prx->prx_front, prx);
 	cconn_on(prx->prx_front, CCONN_CB_DATA_AVAILABLE, bbal_tcp_front_data);
-	cconn_on(prx->prx_front, CCONN_CB_END, bbal_tcp_end);
+	cconn_on(prx->prx_front, CCONN_CB_END, bbal_tcp_front_end);
 	cconn_on(prx->prx_front, CCONN_CB_ERROR, bbal_tcp_error);
 	cconn_on(prx->prx_front, CCONN_CB_CLOSE, bbal_tcp_close);
 
 	cconn_data_set(prx->prx_back, prx);
 	cconn_on(prx->prx_back, CCONN_CB_CONNECTED, bbal_tcp_back_connect);
 	cconn_on(prx->prx_back, CCONN_CB_DATA_AVAILABLE, bbal_tcp_back_data);
-	cconn_on(prx->prx_back, CCONN_CB_END, bbal_tcp_end);
+	cconn_on(prx->prx_back, CCONN_CB_END, bbal_tcp_back_end);
 	cconn_on(prx->prx_back, CCONN_CB_ERROR, bbal_tcp_error);
 	cconn_on(prx->prx_back, CCONN_CB_CLOSE, bbal_tcp_close);
 
