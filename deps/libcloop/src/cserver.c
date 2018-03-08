@@ -573,14 +573,6 @@ cconn_on_write(cloop_ent_t *clent, int ev)
 		fprintf(stderr, "CCONN[%p] WRITE DATA\n", ccn);
 	}
 
-	if (ccn_sendq_finalised(ccn)) {
-		/*
-		 * The sendq has been completely flushed and we have
-		 * shut down the socket for writes.
-		 */
-		return;
-	}
-
 	cbuf_t *head;
 	while ((head = cbufq_peek(ccn->ccn_sendq)) != NULL) {
 		size_t actual = 0;
@@ -623,6 +615,14 @@ retry:
 				return;
 			}
 		}
+	}
+
+	if (ccn_sendq_finalised(ccn)) {
+		/*
+		 * The sendq has been completely flushed and we have shut down
+		 * the socket for writes.
+		 */
+		return;
 	}
 
 	if (cbufq_peek(ccn->ccn_sendq) != NULL) {
