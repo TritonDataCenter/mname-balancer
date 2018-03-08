@@ -89,6 +89,9 @@ struct cconn {
 	boolean_t ccn_sendq_end;
 	boolean_t ccn_sendq_flushed;
 
+	uint64_t ccn_bytes_sent;
+	uint64_t ccn_bytes_recv;
+
 	cconn_cb_t *ccn_on_data_available;
 	cconn_cb_t *ccn_on_end;
 	cconn_cb_t *ccn_on_error;
@@ -464,6 +467,7 @@ cconn_send(cconn_t *ccn, cbuf_t *cbuf)
 	}
 
 	cbuf_flip(cbuf);
+	ccn->ccn_bytes_sent += cbuf_available(cbuf);
 	cbufq_enq(ccn->ccn_sendq, cbuf);
 	cloop_ent_want(ccn->ccn_clent, CLOOP_CB_WRITE);
 	return (0);
@@ -733,6 +737,7 @@ retry:
 	/*
 	 * Handle any new data that has arrived:
 	 */
+	ccn->ccn_bytes_recv += actual;
 	ccn_handle_incoming_data(ccn, actual > 0);
 	return;
 

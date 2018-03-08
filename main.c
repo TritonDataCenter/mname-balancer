@@ -46,6 +46,10 @@ int g_sock = -1;
  */
 hrtime_t g_loop_time = 0;
 
+cloop_t *g_loop;
+cloop_ent_t *g_udp;
+cserver_t *g_tcp;
+
 static void
 run_timer_rebalance(cloop_ent_t *ent, int event)
 {
@@ -81,9 +85,6 @@ run_timer_backends(cloop_ent_t *ent, int event)
 int
 main(int argc, char *argv[])
 {
-	cloop_t *loop = NULL;
-	cloop_ent_t *udp = NULL;
-	cserver_t *tcp = NULL;
 	const char *listen_ip = "0.0.0.0";
 	const char *listen_port = "53";
 	const char *backends_path = NULL;
@@ -152,8 +153,8 @@ main(int argc, char *argv[])
 		err(1, "cserver_signal_setup");
 	}
 
-	if (cloop_alloc(&loop) != 0 || cloop_ent_alloc(&udp) != 0 ||
-	    cserver_alloc(&tcp) != 0) {
+	if (cloop_alloc(&g_loop) != 0 || cloop_ent_alloc(&g_udp) != 0 ||
+	    cserver_alloc(&g_tcp) != 0) {
 		bunyan_fatal(g_log, "cloop init failure",
 		    BUNYAN_T_INT32, "errno", (int32_t)errno,
 		    BUNYAN_T_STRING, "strerror", strerror(errno),
@@ -161,7 +162,7 @@ main(int argc, char *argv[])
 		exit(1);
 	}
 
-	if (backends_init(loop, backends_path) != 0 || remotes_init() != 0 ||
+	if (backends_init(g_loop, backends_path) != 0 || remotes_init() != 0 ||
 	    timeout_init() != 0) {
 		bunyan_fatal(g_log, "data structure failure",
 		    BUNYAN_T_INT32, "errno", (int32_t)errno,
@@ -189,7 +190,7 @@ main(int argc, char *argv[])
 	};
 	for (unsigned i = 0; timer_defs[i].tde_func != NULL; i++) {
 		if (cloop_ent_alloc(&timer_defs[i].tde_ent) != 0 ||
-		    cloop_attach_ent_timer(loop, timer_defs[i].tde_ent,
+		    cloop_attach_ent_timer(g_loop, timer_defs[i].tde_ent,
 		    timer_defs[i].tde_interval) != 0) {
 			bunyan_fatal(g_log, "timer init failure",
 			    BUNYAN_T_INT32, "errno", (int32_t)errno,
@@ -208,15 +209,15 @@ main(int argc, char *argv[])
 		exit(1);
 	}
 
-	cloop_attach_ent(loop, udp, g_sock);
+	cloop_attach_ent(g_loop, g_udp, g_sock);
 
-	cloop_ent_on(udp, CLOOP_CB_READ, bbal_udp_read);
-	cloop_ent_want(udp, CLOOP_CB_READ);
+	cloop_ent_on(g_udp, CLOOP_CB_READ, bbal_udp_read);
+	cloop_ent_want(g_udp, CLOOP_CB_READ);
 
 	/*
 	 * Listen on the TCP DNS port.
 	 */
-	if (bbal_tcp_listen(tcp, loop, listen_ip, listen_port) != 0) {
+	if (bbal_tcp_listen(g_tcp, g_loop, listen_ip, listen_port) != 0) {
 		exit(1);
 	}
 
@@ -242,7 +243,7 @@ main(int argc, char *argv[])
 		    BUNYAN_T_INT32, "count", ++loopc,
 		    BUNYAN_T_END);
 
-		if (cloop_run(loop, &again) != 0) {
+		if (cloop_run(g_loop, &again) != 0) {
 			bunyan_fatal(g_log, "cloop run failure",
 			    BUNYAN_T_INT32, "errno", (int32_t)errno,
 			    BUNYAN_T_STRING, "strerror", strerror(errno),
