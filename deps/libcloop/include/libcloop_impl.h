@@ -6,7 +6,9 @@
 
 struct cloop {
 	list_t cloop_ents;
+	list_t cloop_actions;
 	int cloop_port;
+	int cloop_active;
 };
 
 struct cloop_ent {
@@ -31,6 +33,7 @@ struct cloop_ent {
 
 	cloop_t *clent_loop;
 	list_node_t clent_link;
+	list_node_t clent_link_action;
 
 	const char *clent_error_info;
 	int clent_error_errno;

@@ -17,6 +17,7 @@
 
 static void cloop_ent_free_impl(cloop_ent_t *clent);
 static void cloop_run_one_event(cloop_t *cloop, port_event_t *pe);
+static void cloop_ent_enqueue_action(cloop_ent_t *clent);
 
 /*
  * This function is used when no callback is registered for a particular
@@ -48,6 +49,10 @@ cloop_alloc(cloop_t **cloopp)
 	list_create(&cloop->cloop_ents, sizeof (cloop_ent_t),
 	    offsetof(cloop_ent_t, clent_link));
 
+	list_create(&cloop->cloop_actions, sizeof (cloop_ent_t),
+	    offsetof(cloop_ent_t, clent_link_action));
+
+
 	*cloopp = cloop;
 	return (0);
 }
@@ -78,8 +83,16 @@ cloop_run(cloop_t *cloop, unsigned int *again)
 		*again = 1;
 	}
 
-	for (cloop_ent_t *clent = list_head(&cloop->cloop_ents); clent != NULL;
-	    clent = list_next(&cloop->cloop_ents, clent)) {
+	/*
+	 * Process the list of loop entities which need maintenance actions.
+	 */
+	cloop_ent_t *clent;
+	while ((clent = list_remove_head(&cloop->cloop_actions)) != NULL) {
+		if (clent->clent_destroy) {
+			cloop_ent_free_impl(clent);
+			continue;
+		}
+
 		if (!clent->clent_reassoc) {
 			continue;
 		}
@@ -109,9 +122,11 @@ again:
 	}
 	VERIFY3U(nget, >, 0);
 
+	cloop->cloop_active = 1;
 	for (uint_t i = 0; i < nget; i++) {
 		cloop_run_one_event(cloop, &pe[i]);
 	}
+	cloop->cloop_active = 0;
 
 	return (0);
 }
@@ -125,6 +140,7 @@ cloop_run_one_event(cloop_t *cloop, port_event_t *pe)
 		VERIFY3S(clent->clent_type, ==, CLOOP_ENT_TYPE_FD);
 		VERIFY3S(clent->clent_fd, ==, (int)pe->portev_object);
 		clent->clent_reassoc = 1;
+		cloop_ent_enqueue_action(clent);
 
 		/*
 		 * We mark this entity as processing to defer destroys until
@@ -163,7 +179,6 @@ cloop_run_one_event(cloop_t *cloop, port_event_t *pe)
 		 * Check if this entity was destroyed by one of the callbacks.
 		 */
 		if (clent->clent_destroy) {
-			cloop_ent_free_impl(clent);
 			break;
 		}
 
@@ -261,6 +276,16 @@ cloop_ent_error_info(cloop_ent_t *clent)
 }
 
 static void
+cloop_ent_enqueue_action(cloop_ent_t *clent)
+{
+	if (list_link_active(&clent->clent_link_action)) {
+		return;
+	}
+
+	list_insert_tail(&clent->clent_loop->cloop_actions, clent);
+}
+
+static void
 cloop_ent_free_impl(cloop_ent_t *clent)
 {
 	if (clent == NULL) {
@@ -268,6 +293,9 @@ cloop_ent_free_impl(cloop_ent_t *clent)
 	}
 
 	if (clent->clent_loop != NULL) {
+		if (list_link_active(&clent->clent_link_action)) {
+			list_remove(&clent->clent_loop->cloop_actions, clent);
+		}
 		list_remove(&clent->clent_loop->cloop_ents, clent);
 		clent->clent_loop = NULL;
 	}
@@ -292,8 +320,10 @@ cloop_ent_free(cloop_ent_t *clent)
 		return;
 	}
 
-	if (clent->clent_active) {
+	if (clent->clent_active || (clent->clent_loop != NULL &&
+	    clent->clent_loop->cloop_active)) {
 		clent->clent_destroy = 1;
+		cloop_ent_enqueue_action(clent);
 		return;
 	}
 
@@ -330,6 +360,10 @@ cloop_attach_ent(cloop_t *cloop, cloop_ent_t *clent, int fd)
 	clent->clent_fd = fd;
 	clent->clent_loop = cloop;
 	list_insert_tail(&cloop->cloop_ents, clent);
+
+	if (clent->clent_reassoc) {
+		cloop_ent_enqueue_action(clent);
+	}
 }
 
 int
@@ -386,6 +420,10 @@ ok:
 	clent->clent_timer = timer;
 	clent->clent_loop = cloop;
 
+	if (clent->clent_reassoc) {
+		cloop_ent_enqueue_action(clent);
+	}
+
 	return (0);
 }
 
@@ -409,6 +447,9 @@ cloop_ent_want(cloop_ent_t *clent, int event)
 	if ((clent->clent_events & e) != e) {
 		clent->clent_events |= e;
 		clent->clent_reassoc = 1;
+		if (clent->clent_loop != NULL) {
+			cloop_ent_enqueue_action(clent);
+		}
 	}
 }
 
