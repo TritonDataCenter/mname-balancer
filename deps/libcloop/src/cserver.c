@@ -104,6 +104,8 @@ struct cconn {
 	int ccn_error_errno;
 
 	void *ccn_data;
+
+	boolean_t ccn_stuck;
 };
 
 struct cserver {
@@ -447,6 +449,15 @@ cconn_abort(cconn_t *ccn)
 	return (0);
 }
 
+/*
+ * XXX
+ */
+int
+cconn_stuck(cconn_t *ccn)
+{
+	return (ccn->ccn_stuck == B_TRUE);
+}
+
 int
 cconn_send(cconn_t *ccn, cbuf_t *cbuf)
 {
@@ -604,6 +615,7 @@ retry:
 				goto retry;
 
 			case EAGAIN:
+				ccn->ccn_stuck = B_TRUE;
 				cloop_ent_want(clent, CLOOP_CB_WRITE);
 				return;
 
@@ -618,6 +630,8 @@ retry:
 				    errno);
 				return;
 			}
+		} else {
+			ccn->ccn_stuck = B_FALSE;
 		}
 	}
 
