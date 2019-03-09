@@ -22,18 +22,28 @@ OBJS =		main.o \
 		remotes.o \
 		timeouts.o
 
+PROM_OBJS =	prom.o \
+		cloop.o \
+		cserver.o \
+		custr.o \
+		strmap.o \
+		http.o
+
 HEADERS =	bbal.h
 
 DEPS_LIBS =	illumos_list.a \
 		libcbuf.a \
-		illumos_bunyan.a
+		illumos_bunyan.a \
+		http-parser.a
 
 LIBS =		$(DEPS_LIBS:%=$(OBJ_DIR)/%) -lnsl -lsocket -lumem -lavl -lnvpair
 
 INCS =		$(TOP)/deps/illumos-list/include \
 		$(TOP)/deps/libcbuf/include \
 		$(TOP)/deps/libcloop/include \
-		$(TOP)/deps/illumos-bunyan/include
+		$(TOP)/deps/illumos-bunyan/include \
+		$(TOP)/deps/http-parser \
+		$(TOP)/deps/strings
 
 CFLAGS =	-Wall -Wextra -Werror \
 		-Wno-unused-parameter \
@@ -60,6 +70,11 @@ ifeq (,$(wildcard /usr/include/endian.h))
 DEPS_CFLAGS +=	-DLIBCBUF_NO_ENDIAN_H
 endif
 
+prom: $(PROM_OBJS:%=$(OBJ_DIR)/%) $(DEPS_LIBS:%=$(OBJ_DIR)/%)
+	$(CC) $(CFLAGS) -o $@ $(PROM_OBJS:%=$(OBJ_DIR)/%) \
+	    $(OBJ_DIR)/bunyan_provider.o $(LIBS)
+	$(CTFCONVERT) -o $@ $@
+
 $(PROG): $(OBJS:%=$(OBJ_DIR)/%) $(DEPS_LIBS:%=$(OBJ_DIR)/%)
 	$(CC) $(CFLAGS) -o $@ $(OBJS:%=$(OBJ_DIR)/%) \
 	    $(OBJ_DIR)/bunyan_provider.o $(LIBS)
@@ -74,6 +89,9 @@ $(OBJ_DIR)/%.o: %.c $(HEADERS) | deps/libcbuf/.git $(OBJ_DIR)
 $(OBJ_DIR)/%.o: deps/libcloop/src/%.c | $(OBJ_DIR)
 	$(CC) -c $(CFLAGS) -o $@ $<
 
+$(OBJ_DIR)/%.o: deps/strings/%.c | $(OBJ_DIR)
+	$(CC) -c $(CFLAGS) -o $@ $<
+
 $(OBJ_DIR)/illumos_list.a: | deps/illumos-list/.git $(OBJ_DIR)
 	cd deps/illumos-list && $(MAKE) BUILD_DIR=$(OBJ_DIR) \
 	    EXTRA_CFLAGS='$(DEPS_CFLAGS)'
@@ -81,6 +99,11 @@ $(OBJ_DIR)/illumos_list.a: | deps/illumos-list/.git $(OBJ_DIR)
 $(OBJ_DIR)/illumos_bunyan.a: | deps/illumos-bunyan/.git $(OBJ_DIR)
 	cd deps/illumos-bunyan && $(MAKE) BUILD_DIR=$(OBJ_DIR) \
 	    EXTRA_CFLAGS='$(DEPS_CFLAGS)'
+
+$(OBJ_DIR)/http-parser.a: | deps/http-parser/.git $(OBJ_DIR)
+	cd deps/http-parser && $(MAKE) CC=$(CC) CFLAGS='$(CFLAGS)' package
+	rm -f $@
+	cp deps/http-parser/libhttp_parser.a $@
 
 $(OBJ_DIR)/libcbuf.a: | deps/libcbuf/.git $(OBJ_DIR)
 	cd deps/libcbuf && $(MAKE) OBJ_DIR=$(OBJ_DIR) \
@@ -95,4 +118,5 @@ clean:
 
 clobber: clean
 	cd deps/illumos-list && $(MAKE) clean
+	cd deps/http-parser && $(MAKE) clean
 	rm -rf $(OBJ_DIR)

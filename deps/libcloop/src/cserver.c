@@ -282,7 +282,13 @@ top:
 		goto release;
 
 	case CCONN_ST_READ_EOF:
-		VERIFY(ostate == CCONN_ST_WAITING_FOR_DATA);
+		/*
+		 * Note that if the consumer has not yet called
+		 * cconn_more_data() when we hit EOF, we may still be in the
+		 * DATA_AVAILABLE state instead of the WAITING_FOR_DATA state.
+		 */
+		VERIFY(ostate == CCONN_ST_WAITING_FOR_DATA ||
+		    ostate == CCONN_ST_DATA_AVAILABLE);
 		if (ccn->ccn_on_end != NULL) {
 			ccn->ccn_on_end(ccn, CCONN_CB_END);
 		}

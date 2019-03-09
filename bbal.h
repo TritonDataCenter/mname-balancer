@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <stddef.h>
+#include <stdbool.h>
 #include <inttypes.h>
 #include <unistd.h>
 #include <strings.h>
@@ -33,6 +34,8 @@
 #include <libcbuf.h>
 #include <libcloop.h>
 #include <bunyan.h>
+#include <custr.h>
+#include <strmap.h>
 
 #ifndef	_BBAL_H
 #define	_BBAL_H
@@ -182,5 +185,16 @@ extern void remotes_rebalance(uint32_t, uint32_t);
 extern int remotes_init(void);
 
 #define	SECONDS_IN_NS(s)	(s * NANOSEC)
+
+typedef struct http_inc http_inc_t;
+
+extern int http_inc_alloc(http_inc_t **himp);
+extern void http_inc_free(http_inc_t *him);
+extern int http_inc_input_cbuf(http_inc_t *him, cbuf_t *cbuf);
+extern bool http_inc_complete(http_inc_t *him);
+extern const char *http_inc_method(http_inc_t *him);
+extern const char *http_inc_url(http_inc_t *him);
+extern const char *http_inc_error(http_inc_t *him);
+extern const strmap_t *http_inc_headers(http_inc_t *him);
 
 #endif	/* _BBAL_H_ */

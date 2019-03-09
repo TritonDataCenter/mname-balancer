@@ -4,3 +4,6 @@
 [submodule "deps/illumos-list"]
 	path = deps/illumos-list
 	url = https://github.com/joyent/illumos-list.git
+[submodule "deps/http-parser"]
+	path = deps/http-parser
+	url = https://github.com/nodejs/http-parser
