@@ -133,6 +133,7 @@ typedef struct {
 	uint64_t be_stat_conn_error;
 	uint64_t be_stat_udp;
 	uint64_t be_stat_tcp;
+	uint64_t be_stat_stuck;
 } backend_t;
 
 typedef struct {

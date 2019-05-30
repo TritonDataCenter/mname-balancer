@@ -104,6 +104,12 @@ struct cconn {
 	int ccn_error_errno;
 
 	void *ccn_data;
+
+	/*
+	 * Record whether the last send() operation failed due to a full
+	 * outbound socket buffer.
+	 */
+	boolean_t ccn_stuck;
 };
 
 struct cserver {
@@ -447,6 +453,22 @@ cconn_abort(cconn_t *ccn)
 	return (0);
 }
 
+/*
+ * Returns 1 if the outbound socket buffer was full last time we tried to send
+ * data to the remote peer, or 0 if not.
+ *
+ * This can be used by the caller to make coarse-grained decisions about back
+ * pressure: if the buffer is full, this is likely because the remote peer has
+ * not yet been able to read and process data we've already sent.  To avoid
+ * unbounded queueing, the caller may discard or suspend production of data
+ * while the connection is stuck.
+ */
+int
+cconn_stuck(cconn_t *ccn)
+{
+	return (ccn->ccn_stuck == B_TRUE);
+}
+
 int
 cconn_send(cconn_t *ccn, cbuf_t *cbuf)
 {
@@ -604,6 +626,15 @@ retry:
 				goto retry;
 
 			case EAGAIN:
+				/*
+				 * If send() fails with EAGAIN/EWOULDBLOCK, the
+				 * socket send queue is likely full.  Record
+				 * this fact so that the caller can make a
+				 * decision to back off until the remote host
+				 * is able to catch up, and wait for the socket
+				 * to be writable again before retrying.
+				 */
+				ccn->ccn_stuck = B_TRUE;
 				cloop_ent_want(clent, CLOOP_CB_WRITE);
 				return;
 
@@ -618,6 +649,12 @@ retry:
 				    errno);
 				return;
 			}
+		} else {
+			/*
+			 * If we were able to send(), the outbound socket
+			 * buffer is no longer full.
+			 */
+			ccn->ccn_stuck = B_FALSE;
 		}
 	}
 
