@@ -183,6 +183,15 @@ again:
 		goto bail;
 	}
 
+	if (cconn_stuck(be->be_conn)) {
+		bunyan_trace(be->be_log, "stuck backend write queue",
+		    BUNYAN_T_END);
+
+		rem->rem_stat_udp_drop++;
+		be->be_stat_stuck++;
+		goto bail;
+	}
+
 	rem->rem_stat_udp++;
 	be->be_stat_udp++;
 

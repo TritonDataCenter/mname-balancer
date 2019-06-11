@@ -107,6 +107,7 @@ extern void cconn_more_data(cconn_t *ccn);
 extern int cconn_send(cconn_t *ccn, cbuf_t *);
 extern int cconn_fin(cconn_t *ccn);
 extern int cconn_abort(cconn_t *ccn);
+extern int cconn_stuck(cconn_t *ccn);
 
 extern void *cconn_data(cconn_t *ccn);
 extern void cconn_data_set(cconn_t *ccn, void *data);
