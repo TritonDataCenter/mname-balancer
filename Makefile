@@ -5,7 +5,7 @@
 #
 
 #
-# Copyright (c) 2018, Joyent, Inc.
+# Copyright 2020 Joyent, Inc.
 #
 
 TOP =		$(PWD)
@@ -46,7 +46,7 @@ DEPS_CFLAGS +=	-pthread
 
 OBJ_DIR =	$(TOP)/obj
 
-CTFCONVERT =	/opt/ctf/bin/ctfconvert
+CTFCONVERT =	/bin/true
 CC =		gcc
 GIT =		git
 
@@ -63,7 +63,7 @@ endif
 $(PROG): $(OBJS:%=$(OBJ_DIR)/%) $(DEPS_LIBS:%=$(OBJ_DIR)/%)
 	$(CC) $(CFLAGS) -o $@ $(OBJS:%=$(OBJ_DIR)/%) \
 	    $(OBJ_DIR)/bunyan_provider.o $(LIBS)
-	$(CTFCONVERT) -o $@ $@
+	$(CTFCONVERT) $@
 
 $(OBJ_DIR):
 	mkdir -p $@
