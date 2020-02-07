@@ -46,6 +46,10 @@ DEPS_CFLAGS +=	-pthread
 
 OBJ_DIR =	$(TOP)/obj
 
+#
+# This repo is typically built via binder, which will set CTFCONVERT
+# appropriately as an override.
+#
 CTFCONVERT =	/bin/true
 CC =		gcc
 GIT =		git
