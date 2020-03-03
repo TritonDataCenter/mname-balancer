@@ -5,7 +5,7 @@
 #
 
 #
-# Copyright (c) 2018, Joyent, Inc.
+# Copyright (c) 2020, Joyent, Inc.
 #
 
 TOP =		$(PWD)
@@ -46,7 +46,7 @@ DEPS_CFLAGS +=	-pthread
 
 OBJ_DIR =	$(TOP)/obj
 
-CTFCONVERT =	/opt/ctf/bin/ctfconvert
+CTFCONVERT =	/bin/true
 CC =		gcc
 GIT =		git
 
