@@ -46,6 +46,10 @@ DEPS_CFLAGS +=	-pthread
 
 OBJ_DIR =	$(TOP)/obj
 
+#
+# This repo is typically built via binder, which will set CTFCONVERT
+# appropriately as an override.
+#
 CTFCONVERT =	/bin/true
 CC =		gcc
 GIT =		git
@@ -60,10 +64,15 @@ ifeq (,$(wildcard /usr/include/endian.h))
 DEPS_CFLAGS +=	-DLIBCBUF_NO_ENDIAN_H
 endif
 
+#
+# Work around for "values.c is missing debug info" on older systems.
+#
+CTFFLAGS = -m
+
 $(PROG): $(OBJS:%=$(OBJ_DIR)/%) $(DEPS_LIBS:%=$(OBJ_DIR)/%)
 	$(CC) $(CFLAGS) -o $@ $(OBJS:%=$(OBJ_DIR)/%) \
 	    $(OBJ_DIR)/bunyan_provider.o $(LIBS)
-	$(CTFCONVERT) -o $@ $@
+	$(CTFCONVERT) $(CTFFLAGS) $@
 
 $(OBJ_DIR):
 	mkdir -p $@

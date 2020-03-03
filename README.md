@@ -9,9 +9,9 @@
 -->
 
 This repository is part of the Joyent Triton project. See the [contribution
-guidelines](https://github.com/joyent/triton/blob/master/CONTRIBUTING.md) --
-*Triton does not use GitHub PRs* -- and general documentation at the main
-[Triton project](https://github.com/joyent/triton) page.
+guidelines](https://github.com/joyent/triton/blob/master/CONTRIBUTING.md)
+and general documentation at the main [Triton
+project](https://github.com/joyent/triton) page.
 
 # Binder Load Balancer (mname-balancer)
 
@@ -125,7 +125,7 @@ For development purposes it is possible to build this repository directly.
 In a SmartOS zone, install appropriate build tools:
 
 * C compiler and GNU make; e.g., `pkgin install build-essential`
-* CTF tools in `/opt/ctf`; [see ctftools README][ctftools]
+* CTFCONVERT set appropriately
 
 With those tools installed, you should be able to build the balancer program
 with `gmake`.  The resultant binary will be called `bbal`.
@@ -241,7 +241,6 @@ debugging information in a form that is often useful to operators.
 <!-- References -->
 [mname]: https://github.com/joyent/node-mname
 [binder]: https://github.com/joyent/binder
-[ctftools]: https://us-east.manta.joyent.com/Joyent_Dev/public/ctftools/README.txt
 [smf]: https://github.com/joyent/binder/blob/0a065742b61417a91050350075b7f8f4bb943e86/smf/manifests/binder-balancer.xml.in#L39-L46
 [bunyan]: https://github.com/trentm/node-bunyan
 [list_create]: https://illumos.org/man/9F/list_create
