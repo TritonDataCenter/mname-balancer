@@ -613,8 +613,8 @@ cconn_on_write(cloop_ent_t *clent, int ev)
 			continue;
 		}
 		if (cserver_debug) {
-			fprintf(stderr, "CCONN[%p] WRITE DATA: HAVE %d; "
-			    "Q %d\n", ccn, want,
+			fprintf(stderr, "CCONN[%p] WRITE DATA: HAVE %ld; "
+			    "Q %ld\n", ccn, want,
 			    cbufq_available(ccn->ccn_sendq));
 		}
 
@@ -696,7 +696,7 @@ cconn_on_read(cloop_ent_t *clent, int ev)
 		 * wakeup and go back to sleep without rearming.
 		 */
 		if (cserver_debug) {
-			fprintf(stderr, "CCONN[%p] READ TOO MUCH (%d)\n", ccn,
+			fprintf(stderr, "CCONN[%p] READ TOO MUCH (%ld)\n", ccn,
 			    av);
 		}
 		return;
@@ -710,7 +710,7 @@ cconn_on_read(cloop_ent_t *clent, int ev)
 		cbuf_resume(cbuf);
 		VERIFY(cbuf_available(cbuf) > 8);
 		if (cserver_debug) {
-			fprintf(stderr, "CCONN[%p] REUSE BUF %p (UNUSED %u)\n",
+			fprintf(stderr, "CCONN[%p] REUSE BUF %p (UNUSED %lu)\n",
 			    ccn, cbuf, cbuf_available(cbuf));
 		}
 	} else {
@@ -723,7 +723,7 @@ cconn_on_read(cloop_ent_t *clent, int ev)
 		}
 		cbuf_byteorder_set(cbuf, ccn->ccn_order);
 		if (cserver_debug) {
-			fprintf(stderr, "CCONN[%p] ALLOC BUF %p (UNUSED %u)\n",
+			fprintf(stderr, "CCONN[%p] ALLOC BUF %p (UNUSED %lu)\n",
 			    ccn, cbuf, cbuf_available(cbuf));
 		}
 	}
@@ -759,7 +759,7 @@ retry:
 			fprintf(stderr, "CCONN[%p] READ EOF\n", ccn);
 		}
 	} else if (cserver_debug) {
-		fprintf(stderr, "CCONN[%p] READ %u BYTES\n", ccn, actual);
+		fprintf(stderr, "CCONN[%p] READ %lu BYTES\n", ccn, actual);
 	}
 
 	cbuf_flip(cbuf);

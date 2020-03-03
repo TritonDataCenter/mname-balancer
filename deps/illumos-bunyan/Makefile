@@ -27,7 +27,7 @@ $(PROVIDER_H): $(PROVIDER_D) | $(BUILD_DIR)
 	$(DTRACE) -h -o $@ -s $<
 
 $(PROVIDER_O): $(PROVIDER_D) $(OBJECTS) | $(BUILD_DIR)
-	$(DTRACE) -32 -G -o $@ -s $< $(OBJECTS)
+	$(DTRACE) -G -o $@ -s $< $(OBJECTS)
 
 $(BUILD_DIR):
 	mkdir -p $@

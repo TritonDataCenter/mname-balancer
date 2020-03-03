@@ -131,7 +131,7 @@ another_packet:
 again:
 	if (cbuf_sys_recvfrom(buf, cloop_ent_fd(ent),
 	    CBUF_SYSREAD_ENTIRE, &rsz, 0, (struct sockaddr *)&from,
-	    &fromlen) != 0) {
+	    (size_t *)&fromlen) != 0) {
 		switch (errno) {
 		case EINTR:
 			goto again;
