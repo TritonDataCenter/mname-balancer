@@ -35,7 +35,7 @@ INCS =		$(TOP)/deps/illumos-list/include \
 		$(TOP)/deps/libcloop/include \
 		$(TOP)/deps/illumos-bunyan/include
 
-CFLAGS =	-Wall -Wextra -Werror \
+CFLAGS =	-Wall -m64 -Wextra -Werror \
 		-Wno-unused-parameter \
 		-std=c99 -D__EXTENSIONS__ -pthread \
 		-O0 -gdwarf-2 \
